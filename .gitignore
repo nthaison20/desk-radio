@@ -221,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# desk-radio
+.env
+.mpd-dev/
