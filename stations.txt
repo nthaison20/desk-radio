@@ -1,0 +1,3 @@
+# name = stream URL
+groovesalad = https://ice1.somafm.com/groovesalad-128-mp3
+dronezone   = https://ice1.somafm.com/dronezone-128-mp3
