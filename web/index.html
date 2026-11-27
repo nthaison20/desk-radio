@@ -6,6 +6,14 @@
 <meta name="theme-color" content="#0c0a06">
 <meta name="color-scheme" content="dark">
 <title>Desk Radio</title>
+<!-- Home-screen app: icon, name, and full-screen launch (iPhone reads the apple-* tags) -->
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Desk Radio">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
@@ -156,6 +164,28 @@
   .zoom button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .zoom button:disabled { opacity: 0.35; cursor: default; }
   .map-help { color: var(--muted); font-size: 0.8rem; margin: 6px 2px 0; }
+  .map-search { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-bottom: 8px; }
+  .map-search input {
+    font: inherit; min-height: 44px; padding: 0 12px; border-radius: 2px; min-width: 0;
+    border: 2px solid var(--line); background: var(--card); color: var(--text);
+  }
+  .map-search input::placeholder { color: var(--muted); }
+  .map-search .go { min-height: 44px; border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+  .hits {
+    position: absolute; z-index: 3; left: 0; right: 0; top: calc(100% + 4px); display: grid;
+    background: var(--card); border: 2px solid var(--accent); border-radius: 4px;
+    max-height: 320px; overflow-y: auto; box-shadow: 0 10px 24px -10px #000;
+  }
+  .hit {
+    display: grid; gap: 1px; text-align: left; padding: 9px 12px; min-height: 48px; cursor: pointer;
+    font: inherit; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--text);
+  }
+  .hit:last-child { border-bottom: 0; }
+  .hit:hover, .hit:focus-visible { background: var(--soft); }
+  .hit-name { font-weight: 600; }
+  .hit-detail { color: var(--muted); font-size: 0.83rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hits .note { padding: 12px; margin: 0; }
+  .signout { margin-top: 28px; }
   .place-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; margin: 12px 2px 8px; }
   .place-title { font: 1.3rem/1.2 var(--pixel); letter-spacing: 0.03em; text-transform: uppercase; }
   .place-count { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
@@ -216,6 +246,11 @@
       <button class="back" id="map-back" type="button" hidden>◀ World</button>
       <div class="map-title" id="map-title">World</div>
     </div>
+    <form class="map-search" id="map-search" role="search">
+      <input id="map-q" type="search" placeholder="Find a country or city" aria-label="Find a country or city" autocomplete="off" enterkeyhint="search">
+      <button class="go" type="submit">Go</button>
+      <div class="hits" id="map-results" hidden></div>
+    </form>
     <div class="screen" id="screen">
       <canvas id="pixelmap" role="img" aria-label="Pixel map of radio stations. Tap a country, then a station marker. Drag to move, pinch or use the zoom buttons to zoom."></canvas>
       <div class="map-status" id="map-status">LOADING…</div>
@@ -231,8 +266,13 @@
     </div>
     <div class="list" id="place"></div>
     <button class="more" id="place-more" type="button" hidden>Show all</button>
-    <p class="credit">Stations: <a href="https://www.radio-browser.info" target="_blank" rel="noopener">Radio Browser</a> · Borders: <a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a></p>
+    <button class="more" id="place-explore" type="button" hidden></button>
+    <p class="credit">Stations:<a href="https://www.radio-browser.info" target="_blank" rel="noopener">Radio Browser</a> · Borders: <a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a> · Places: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a></p>
   </section>
+
+  <form class="signout" id="signout" method="post" action="/logout" hidden>
+    <button class="more" type="submit">Sign out</button>
+  </form>
 </main>
 
 <audio id="player" preload="none"></audio>
@@ -248,6 +288,8 @@
     mapBack: $("map-back"), mapTitle: $("map-title"), screen: $("screen"), canvas: $("pixelmap"), mapStatus: $("map-status"),
     zoomIn: $("zoom-in"), zoomOut: $("zoom-out"),
     placeTitle: $("place-title"), placeCount: $("place-count"), place: $("place"), placeMore: $("place-more"),
+    mapSearch: $("map-search"), mapQ: $("map-q"), mapResults: $("map-results"), signout: $("signout"),
+    placeExplore: $("place-explore"),
   };
   const app = {
     mine: [], results: [], current: null, query: { q: "", by: "name" }, offset: 0, loaded: false,
@@ -265,6 +307,10 @@
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     };
     const res = await fetch(path, opts);
+    if (res.status === 401) { // signed out (e.g. the 30 days ran out): reload to show the sign-in page
+      location.reload();
+      return new Promise(() => {});
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     return data;
@@ -460,6 +506,7 @@
   function showList(title, count, stations) {
     app.list = stations;
     app.listAll = false;
+    els.placeExplore.hidden = true; // only a looked-up place with few mapped stations shows this
     els.placeTitle.textContent = title;
     els.placeCount.textContent = count;
     renderList();
@@ -985,6 +1032,95 @@
   els.zoomOut.addEventListener("click", () => pm.frame && zoomAt(pm.size.W / 2, pm.size.H / 2, 0.5, true));
   els.mapBack.addEventListener("click", showWorld);
 
+  // ---- find a place ----
+  // Countries match instantly as you type, from the map data already on the device (nothing is sent).
+  // Cities are looked up only when you press Go: OpenStreetMap's rules forbid search-as-you-type.
+  const fold = s => (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+  function countryHits(q) {
+    const f = fold(q);
+    if (!f || !pm.countries) return [];
+    return pm.countries.map((c, i) => ({ c, i, n: fold(c.name) }))
+      .filter(x => x.n.includes(f))
+      .sort((a, b) => (b.n.startsWith(f) - a.n.startsWith(f)) || (b.c.stations - a.c.stations))
+      .slice(0, 5)
+      .map(({ c, i }) => hit(c.name, c.stations ? `Country · ${plural(c.stations, "station")}` : "Country", () => showCountry(i)));
+  }
+
+  function hit(name, detail, pick) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "hit";
+    const n = document.createElement("span");
+    n.className = "hit-name";
+    n.textContent = name;
+    const d = document.createElement("span");
+    d.className = "hit-detail";
+    d.textContent = detail;
+    b.append(n, d);
+    b.addEventListener("click", () => { closeHits(); els.mapQ.blur(); pick(); });
+    return b;
+  }
+
+  function showHits(items) {
+    els.mapResults.replaceChildren(...items);
+    els.mapResults.hidden = !items.length;
+  }
+  function closeHits() { showHits([]); }
+
+  els.mapQ.addEventListener("input", () => showHits(countryHits(els.mapQ.value.trim())));
+  els.mapQ.addEventListener("keydown", e => { if (e.key === "Escape") closeHits(); });
+  document.addEventListener("pointerdown", e => { if (!els.mapSearch.contains(e.target)) closeHits(); });
+
+  let lookupSeq = 0;
+  els.mapSearch.addEventListener("submit", async e => {
+    e.preventDefault();
+    const q = els.mapQ.value.trim();
+    if (q.length < 2 || !pm.countries) return;
+    const seq = ++lookupSeq, countries = countryHits(q);
+    showHits([...countries, note("Looking up cities…")]);
+    try {
+      const { places } = await api(`/api/places?q=${encodeURIComponent(q)}`);
+      if (seq !== lookupSeq) return; // a newer search started meanwhile
+      const cities = places.map(p => hit(p.name, p.detail, () => showPlace(p)));
+      showHits([...countryHits(q), ...(cities.length ? cities : [note("No cities found.")])]);
+    } catch (err) {
+      if (seq === lookupSeq) showHits([...countryHits(q), note(err.message)]);
+    }
+  });
+
+  // Fly to a looked-up place and list the stations around it.
+  function showPlace(p) {
+    const [south, north, west, east] = p.bbox;
+    const lonPad = Math.max(0, (3 - (east - west)) / 2), latPad = Math.max(0, (2 - (north - south)) / 2); // at least ~3° x 2°
+    const b = { lon0: west - lonPad, lon1: east + lonPad, lat0: south - latPad, lat1: north + latPad };
+    pm.sel = -1;
+    pm.selPlace = null;
+    els.mapTitle.textContent = p.name;
+    const near = pm.allPlaces.filter(pl => {
+      const lon = nearestLon(pl.lon, p.lon);
+      return pl.lat >= b.lat0 && pl.lat <= b.lat1 && lon >= b.lon0 && lon <= b.lon1;
+    });
+    const stations = byRank(near.flatMap(pl => pl.stations));
+    showList(stations.length ? `Stations near ${p.name}` : `No mapped stations near ${p.name}`,
+             stations.length ? plural(stations.length, "station") : "", stations.length ? stations : null);
+    // The map only holds the ~5,000 most popular located stations, so some places look empty.
+    // Offer the full directory for that country via Explore.
+    const country = p.detail.split(",").pop().trim();
+    if (stations.length < 5 && country) {
+      els.placeExplore.textContent = `Find more stations in ${country}`;
+      els.placeExplore.onclick = () => {
+        els.q.value = country;
+        els.by.value = "country";
+        app.loaded = true; // we're running the search ourselves
+        showTab("explore");
+        els.search.requestSubmit();
+      };
+      els.placeExplore.hidden = false;
+    }
+    flyTo(fitCam(b));
+  }
+
   let resizeTimer = 0;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
@@ -1037,7 +1173,9 @@
   // ---- start -------------------------------------------------------------
   async function init() {
     try {
-      app.mine = (await api("/api/stations")).stations;
+      const data = await api("/api/stations");
+      app.mine = data.stations;
+      els.signout.hidden = !data.signin; // only offer "Sign out" when a password is set
       const last = app.mine.find(s => s.id === store.get("desk-radio:last"));
       if (last) els.station.textContent = `${last.name} (last played)`;
     } catch (err) {

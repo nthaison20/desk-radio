@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0c0a06">
+<meta name="color-scheme" content="dark">
+<title>Desk Radio</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Desk Radio">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0c0a06; --card: #15110a; --line: #3b2d14; --text: #ffd27a; --muted: #b88a3e;
+    --accent: #ffb000; --accent-text: #0c0a06; --bad: #ff6a3d;
+    --pixel: "VT323", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { width: min(340px, calc(100% - 32px)); padding: 24px 0; text-align: center; }
+  img { width: 96px; height: 96px; image-rendering: pixelated; display: block; margin: 0 auto 14px; }
+  h1 { font: 2.1rem/1 var(--pixel); letter-spacing: 0.04em; margin: 0 0 20px; color: var(--accent); text-shadow: 0 0 8px rgb(255 176 0 / 0.55); }
+  form { display: grid; gap: 10px; text-align: left; }
+  label { font: 1.2rem var(--pixel); color: var(--muted); letter-spacing: 0.04em; }
+  input {
+    font: inherit; min-height: 48px; padding: 0 12px; border-radius: 2px;
+    border: 2px solid var(--line); background: var(--card); color: var(--text);
+  }
+  button {
+    font: 1.35rem/1 var(--pixel); letter-spacing: 0.05em; min-height: 48px; border-radius: 2px; cursor: pointer;
+    border: 2px solid var(--accent); background: var(--accent); color: var(--accent-text);
+  }
+  input:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .error { color: var(--bad); margin: 0; }
+  .note { color: var(--muted); font-size: 0.85rem; margin-top: 16px; text-align: center; }
+  .hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+</style>
+</head>
+<body>
+<main>
+  <img src="/icons/icon-192.png" alt="">
+  <h1>DESK RADIO</h1>
+  <form method="post" action="/login">
+    <!-- Lets the iPhone keychain save this login under a name -->
+    <input class="hidden" type="text" name="username" value="desk-radio" autocomplete="username" tabindex="-1" aria-hidden="true">
+    <label for="password">PASSWORD</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <!--ERROR-->
+    <button type="submit">SIGN IN</button>
+  </form>
+  <p class="note">You'll stay signed in on this device for 30 days.</p>
+</main>
+</body>
+</html>

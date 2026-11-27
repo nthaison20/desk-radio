@@ -18,19 +18,24 @@ Each browser streams the station itself. Standard library only: nothing to insta
                                  fetched once and cached for a day
     GET  /countries-50m.json     country outlines for the pixel map (world-atlas 2.0.2,
                                  ISC licence; Natural Earth data, public domain)
+    GET  /api/places?q=          look up a city/place via OpenStreetMap Nominatim
+                                 (one lookup per second at most, results cached a day)
+    POST /login, /logout         sign in with the password (form field "password") / out
+
+Public without signing in (an iPhone fetches them when adding to the home screen):
+    /manifest.webmanifest, /icons/*.png
 
 Saved stations live in my-stations.json next to this file (gitignored). The first
 time it is missing, it is seeded from stations.txt ('name = url' per line).
 
 Listens on 0.0.0.0:8080 by default; set DESK_RADIO_HOST / DESK_RADIO_PORT to change.
 
-If DESK_RADIO_PASSWORD is set (e.g. in .env, loaded by the systemd service), every
-request needs that password via HTTP Basic Auth; the browser asks once and remembers.
-Any username is accepted. Without it, the page is open to anyone who can reach it.
+If DESK_RADIO_PASSWORD is set (e.g. in .env, loaded by the systemd service), visitors
+see a sign-in page; signing in sets a cookie that lasts 30 days. Changing the password
+signs every device out. Without a password, the page is open to anyone who can reach it.
 """
-import base64
-import binascii
 import gzip
+import hashlib
 import hmac
 import json
 import os
@@ -40,6 +45,7 @@ import socket
 import threading
 import time
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
@@ -51,7 +57,19 @@ HOST = os.environ.get("DESK_RADIO_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DESK_RADIO_PORT", "8080"))
 PASSWORD = os.environ.get("DESK_RADIO_PASSWORD", "")
 PAGE = HERE / "web" / "index.html"
+LOGIN_PAGE = HERE / "web" / "login.html"
 OUTLINES = HERE / "web" / "countries-50m.json"
+PUBLIC_FILES = {  # served without signing in; nothing private in them
+    "/manifest.webmanifest": (HERE / "web" / "manifest.webmanifest", "application/manifest+json"),
+    "/icons/apple-touch-icon.png": (HERE / "web" / "icons" / "apple-touch-icon.png", "image/png"),
+    "/icons/icon-192.png": (HERE / "web" / "icons" / "icon-192.png", "image/png"),
+    "/icons/icon-512.png": (HERE / "web" / "icons" / "icon-512.png", "image/png"),
+    "/icons/icon-maskable-512.png": (HERE / "web" / "icons" / "icon-maskable-512.png", "image/png"),
+    "/favicon.ico": (HERE / "web" / "icons" / "icon-192.png", "image/png"),
+}
+SESSION_COOKIE = "desk_radio_session"
+SESSION_DAYS = 30
+FAILED_LOGIN_DELAY = 1.5   # seconds; slows down password guessing
 DEFAULT_STATIONS = HERE / "stations.txt"
 MY_STATIONS = HERE / "my-stations.json"
 
@@ -64,6 +82,80 @@ MAP_CACHE_SECONDS = 24 * 3600
 MAP_GRID = 0.1             # degrees (~10 km): stations closer than this share one map dot
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SEARCH_FIELDS = {"name", "tag", "country"}
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
+GEO_USER_AGENT = "desk-radio/1.0 (self-hosted personal internet radio)"
+GEO_CACHE_SECONDS = 24 * 3600
+
+
+# ---- sessions ------------------------------------------------------------
+# A session token is "<expiry>.<signature>", signed with a key derived from the password,
+# so tokens survive restarts and stop working as soon as the password changes.
+
+def _session_key():
+    return hashlib.sha256(b"desk-radio session v1\0" + PASSWORD.encode()).digest()
+
+
+def new_session():
+    expires = int(time.time()) + SESSION_DAYS * 86400
+    sig = hmac.new(_session_key(), str(expires).encode(), "sha256").hexdigest()
+    return f"{expires}.{sig}"
+
+
+def valid_session(token):
+    try:
+        expires_s, sig = token.split(".", 1)
+        expires = int(expires_s)
+    except (AttributeError, ValueError):
+        return False
+    if expires < time.time():
+        return False
+    good = hmac.new(_session_key(), str(expires).encode(), "sha256").hexdigest()
+    return hmac.compare_digest(sig, good)
+
+
+# ---- place lookup (OpenStreetMap Nominatim) -----------------------------------
+# Nominatim's usage policy: at most one request per second, a User-Agent naming the
+# application, results cached, and no search-as-you-type (the page only looks up on submit).
+
+_geo_lock = threading.Lock()
+_geo_last = 0.0
+_geo_cache = {}
+
+
+def lookup_places(q):
+    global _geo_last
+    key = q.casefold()
+    hit = _geo_cache.get(key)
+    if hit and time.time() - hit[0] < GEO_CACHE_SECONDS:
+        return hit[1]
+    with _geo_lock:  # one lookup at a time, at least 1.1 s apart
+        wait = 1.1 - (time.time() - _geo_last)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            req = Request(f"{NOMINATIM}?{urlencode({'q': q, 'format': 'jsonv2', 'limit': '6', 'featureType': 'settlement', 'accept-language': 'en'})}",
+                          headers={"User-Agent": GEO_USER_AGENT})
+            with urlopen(req, timeout=8) as res:
+                data = json.load(res)
+        finally:
+            _geo_last = time.time()
+    places = []
+    for r in data if isinstance(data, list) else []:
+        try:
+            south, north, west, east = (float(v) for v in r["boundingbox"])
+            parts = [p.strip() for p in r.get("display_name", "").split(",")]
+            places.append({
+                "name": parts[0] or r.get("name", ""),  # display_name honours accept-language ("Hanoi", not "Hà Nội")
+                "detail": ", ".join(parts[1:])[:90],
+                "lat": float(r["lat"]), "lon": float(r["lon"]),
+                "bbox": [south, north, west, east],
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(_geo_cache) > 500:
+        _geo_cache.clear()
+    _geo_cache[key] = (time.time(), places)
+    return places
 
 
 class RadioBrowser:
@@ -256,13 +348,30 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "desk-radio"
 
     def do_GET(self):
-        if not self._authorized():
-            return
         url = urlsplit(self.path)
+        if url.path in PUBLIC_FILES:
+            path, content_type = PUBLIC_FILES[url.path]
+            self._send(HTTPStatus.OK, path.read_bytes(), content_type, "public, max-age=86400")
+            return
+        if not self._signed_in():
+            if url.path == "/":
+                self._login_page()
+            else:
+                self._json(HTTPStatus.UNAUTHORIZED, {"error": "Please sign in"})
+            return
         if url.path == "/":
             self._send(HTTPStatus.OK, PAGE.read_bytes(), "text/html; charset=utf-8")
         elif url.path == "/api/stations":
-            self._json(HTTPStatus.OK, {"stations": load_my_stations()})
+            self._json(HTTPStatus.OK, {"stations": load_my_stations(), "signin": bool(PASSWORD)})
+        elif url.path == "/api/places":
+            q = (parse_qs(url.query).get("q") or [""])[0].strip()[:100]
+            if len(q) < 2:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Type at least 2 letters"})
+                return
+            try:
+                self._json(HTTPStatus.OK, {"places": lookup_places(q)})
+            except (OSError, ValueError) as exc:
+                self._json(HTTPStatus.BAD_GATEWAY, {"error": f"Place lookup unavailable: {exc}"})
         elif url.path == "/api/search":
             self._search(parse_qs(url.query))
         elif url.path == "/api/map":
@@ -273,9 +382,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def do_POST(self):
-        if not self._authorized():
-            return
         path = urlsplit(self.path).path
+        if path == "/login":
+            self._login()
+            return
+        if path == "/logout":
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if not self._signed_in():
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "Please sign in"})
+            return
         body = self._read_json()
         if body is None:
             return
@@ -361,28 +481,37 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self):
-        """Check the Basic Auth password; on failure send 401 so the browser asks for it."""
+    def _signed_in(self):
         if not PASSWORD:
             return True
-        header = self.headers.get("Authorization", "")
-        scheme, _, encoded = header.partition(" ")
-        given = ""
-        if scheme.lower() == "basic":
-            try:
-                given = base64.b64decode(encoded, validate=True).decode("utf-8").partition(":")[2]
-            except (binascii.Error, UnicodeDecodeError):
-                given = ""
-        if hmac.compare_digest(given.encode(), PASSWORD.encode()):
-            return True
-        body = json.dumps({"error": "Password required"}).encode()
-        self.send_response(HTTPStatus.UNAUTHORIZED)
-        self.send_header("WWW-Authenticate", 'Basic realm="Desk Radio", charset="UTF-8"')
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-        return False
+        try:
+            morsel = SimpleCookie(self.headers.get("Cookie", "")).get(SESSION_COOKIE)
+        except CookieError:
+            return False
+        return bool(morsel) and valid_session(morsel.value)
+
+    def _login_page(self, error="", status=HTTPStatus.OK):
+        html = LOGIN_PAGE.read_text(encoding="utf-8").replace("<!--ERROR-->", error)
+        self._send(status, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _login(self):
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
+        except ValueError:
+            length = 0
+        form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        given = (form.get("password") or [""])[0]
+        if not PASSWORD or hmac.compare_digest(given.encode(), PASSWORD.encode()):
+            self.send_response(HTTPStatus.SEE_OTHER)  # back to the page, now signed in
+            self.send_header("Location", "/")
+            if PASSWORD:
+                self.send_header("Set-Cookie", f"{SESSION_COOKIE}={new_session()}; Path=/; "
+                                               f"Max-Age={SESSION_DAYS * 86400}; HttpOnly; SameSite=Lax")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        time.sleep(FAILED_LOGIN_DELAY)
+        self._login_page('<p class="error" role="alert">Wrong password. Try again.</p>', HTTPStatus.UNAUTHORIZED)
 
     def _read_json(self):
         try:
@@ -404,11 +533,11 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status, data):
         self._send(status, json.dumps(data).encode(), "application/json")
 
-    def _send(self, status, body, content_type):
+    def _send(self, status, body, content_type, cache_control="no-store"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(body)
 
