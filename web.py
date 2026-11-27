@@ -16,6 +16,8 @@ Each browser streams the station itself. Standard library only: nothing to insta
     GET  /api/map                popular stations that have a location, grouped into
                                  places {"places": [{"lat", "lon", "stations": [...]}]};
                                  fetched once and cached for a day
+    GET  /countries-50m.json     country outlines for the pixel map (world-atlas 2.0.2,
+                                 ISC licence; Natural Earth data, public domain)
 
 Saved stations live in my-stations.json next to this file (gitignored). The first
 time it is missing, it is seeded from stations.txt ('name = url' per line).
@@ -49,6 +51,7 @@ HOST = os.environ.get("DESK_RADIO_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DESK_RADIO_PORT", "8080"))
 PASSWORD = os.environ.get("DESK_RADIO_PASSWORD", "")
 PAGE = HERE / "web" / "index.html"
+OUTLINES = HERE / "web" / "countries-50m.json"
 DEFAULT_STATIONS = HERE / "stations.txt"
 MY_STATIONS = HERE / "my-stations.json"
 
@@ -142,6 +145,7 @@ def trim_station(s):
 
 _map_lock = threading.Lock()
 _map_cache = {"time": 0.0, "body": None}  # body = gzipped JSON, ready to send
+_outlines_gz = None  # gzipped country outlines, built on first request
 
 
 def _build_map():
@@ -150,7 +154,7 @@ def _build_map():
         "reverse": "true", "limit": str(MAP_STATIONS),
     })
     places = {}
-    for s in results:
+    for rank, s in enumerate(results):
         lat, lon = s.get("geo_lat"), s.get("geo_long")
         if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
             continue
@@ -159,6 +163,7 @@ def _build_map():
         station = trim_station(s)
         if not station["id"] or not station["url"]:
             continue
+        station["rank"] = rank  # 0 = most popular; keeps merged lists in popularity order
         key = (round(lat / MAP_GRID), round(lon / MAP_GRID))
         place = places.setdefault(key, {"lat": round(lat, 3), "lon": round(lon, 3), "stations": []})
         place["stations"].append(station)  # results are most-popular first, so lists stay sorted
@@ -262,6 +267,8 @@ class Handler(BaseHTTPRequestHandler):
             self._search(parse_qs(url.query))
         elif url.path == "/api/map":
             self._map()
+        elif url.path == "/countries-50m.json":
+            self._outlines()
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -327,14 +334,30 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError) as exc:
             self._json(HTTPStatus.BAD_GATEWAY, {"error": f"Station directory unavailable: {exc}"})
             return
+        self._send_gzipped(body, "no-store")
+
+    def _outlines(self):
+        # The outline file never changes between releases, so compress it once and let browsers keep it a week.
+        global _outlines_gz
+        if _outlines_gz is None:
+            _outlines_gz = gzip.compress(OUTLINES.read_bytes())
+        self._send_gzipped(_outlines_gz, "private, max-age=604800")
+
+    def _send_gzipped(self, body, cache_control):
         if "gzip" not in self.headers.get("Accept-Encoding", ""):
-            self._send(HTTPStatus.OK, gzip.decompress(body), "application/json")
+            plain = gzip.decompress(body)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(plain)))
+            self.send_header("Cache-Control", cache_control)
+            self.end_headers()
+            self.wfile.write(plain)
             return
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(body)
 
