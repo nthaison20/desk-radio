@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """desk-radio: play, stop and check internet radio stations through MPD."""
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from mpd import MPDClient
@@ -22,51 +23,64 @@ def load_stations():
     return stations
 
 
+@contextmanager
 def connect():
+    """Open a connection to MPD and always close it afterwards."""
     client = MPDClient()
+    client.timeout = 5
     client.connect(MPD_HOST, MPD_PORT)
-    return client
+    try:
+        yield client
+    finally:
+        client.disconnect()
 
 
 def play(name):
+    """Play a station by name. Raises KeyError if the name is not in stations.txt."""
     stations = load_stations()
     if name not in stations:
-        sys.exit(f"Unknown station '{name}'. Known: {', '.join(stations)}")
-    client = connect()
-    client.clear()
-    client.add(stations[name])
-    client.play()
-    client.disconnect()
-    print(f"Playing {name}")
+        raise KeyError(name)
+    with connect() as client:
+        client.clear()
+        client.add(stations[name])
+        client.play()
 
 
 def stop():
-    client = connect()
-    client.stop()
-    client.disconnect()
-    print("Stopped")
+    with connect() as client:
+        client.stop()
 
 
-def status():
-    client = connect()
-    state = client.status()
-    song = client.currentsong()
-    client.disconnect()
+def now_playing():
+    """Return {'station': name or None, 'state': 'play'|'stop'|'pause', 'error': str or None}."""
+    with connect() as client:
+        state = client.status()
+        song = client.currentsong()
     url = song.get("file")
     names = {u: n for n, u in load_stations().items()}
-    print(f"{names.get(url, url or 'nothing')} [{state['state']}]")
-    if "error" in state:
-        print(f"MPD error: {state['error']}")
+    return {
+        "station": names.get(url, url),
+        "state": state["state"],
+        "error": state.get("error"),
+    }
 
 
 def main():
     args = sys.argv[1:]
     if args[:1] == ["play"] and len(args) == 2:
-        play(args[1])
+        try:
+            play(args[1])
+        except KeyError:
+            sys.exit(f"Unknown station '{args[1]}'. Known: {', '.join(load_stations())}")
+        print(f"Playing {args[1]}")
     elif args == ["stop"]:
         stop()
+        print("Stopped")
     elif args == ["status"]:
-        status()
+        info = now_playing()
+        print(f"{info['station'] or 'nothing'} [{info['state']}]")
+        if info["error"]:
+            print(f"MPD error: {info['error']}")
     elif args == ["list"]:
         for name in load_stations():
             print(name)

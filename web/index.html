@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desk Radio</title>
+<style>
+  :root {
+    --bg: #f6f4ef;
+    --card: #ffffff;
+    --text: #1d1b18;
+    --muted: #6b665e;
+    --line: #e2ddd3;
+    --accent: #c2410c;
+    --accent-text: #ffffff;
+    --live: #15803d;
+    --bad: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513;
+      --card: #211f1c;
+      --text: #f1ede6;
+      --muted: #a39d93;
+      --line: #35322d;
+      --accent: #fb923c;
+      --accent-text: #1d1b18;
+      --live: #4ade80;
+      --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 480px; margin: 0 auto; padding: 24px 16px 40px; }
+  h1 { font-size: 1.35rem; margin: 0 0 16px; letter-spacing: -0.01em; }
+  .now {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px;
+    margin-bottom: 20px;
+  }
+  .now-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .now-station { font-size: 1.25rem; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+  .now-state { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 0.95rem; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .playing .dot { background: var(--live); }
+  .offline .dot { background: var(--bad); }
+  .error { color: var(--bad); font-size: 0.9rem; margin-top: 8px; }
+  .stations { display: grid; gap: 10px; }
+  button {
+    font: inherit;
+    width: 100%;
+    min-height: 52px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  button.current { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.stop { margin-top: 16px; text-align: center; font-weight: 600; }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Desk Radio</h1>
+
+  <section class="now" id="now" aria-live="polite">
+    <div class="now-label">Now</div>
+    <div class="now-station" id="now-station">…</div>
+    <div class="now-state"><span class="dot"></span><span id="now-state">Connecting</span></div>
+    <div class="error" id="now-error" hidden></div>
+  </section>
+
+  <div class="stations" id="stations"></div>
+  <button class="stop" id="stop" type="button">Stop</button>
+</main>
+
+<script>
+  const els = {
+    now: document.getElementById("now"),
+    station: document.getElementById("now-station"),
+    state: document.getElementById("now-state"),
+    error: document.getElementById("now-error"),
+    stations: document.getElementById("stations"),
+    stop: document.getElementById("stop"),
+  };
+  const STATE_TEXT = { play: "Playing", stop: "Stopped", pause: "Paused" };
+  let current = null;
+
+  async function api(path, body) {
+    const opts = body === undefined ? {} : {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    };
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  }
+
+  function show(info) {
+    current = info.state === "play" ? info.station : null;
+    els.now.className = "now" + (info.state === "play" ? " playing" : "");
+    els.station.textContent = info.station || "Nothing selected";
+    els.state.textContent = STATE_TEXT[info.state] || info.state;
+    els.error.hidden = !info.error;
+    els.error.textContent = info.error || "";
+    for (const btn of els.stations.children) {
+      btn.classList.toggle("current", btn.dataset.name === current);
+      btn.setAttribute("aria-pressed", btn.dataset.name === current);
+    }
+  }
+
+  function showOffline(err) {
+    els.now.className = "now offline";
+    els.state.textContent = "Offline";
+    els.error.hidden = false;
+    els.error.textContent = err.message;
+  }
+
+  async function act(path, body) {
+    const buttons = document.querySelectorAll("button");
+    buttons.forEach(b => (b.disabled = true));
+    try {
+      show(await api(path, body));
+    } catch (err) {
+      showOffline(err);
+    } finally {
+      buttons.forEach(b => (b.disabled = false));
+    }
+  }
+
+  async function refresh() {
+    try { show(await api("/api/status")); } catch (err) { showOffline(err); }
+  }
+
+  async function init() {
+    try {
+      const { stations } = await api("/api/stations");
+      for (const name of stations) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.dataset.name = name;
+        btn.textContent = name;
+        btn.addEventListener("click", () => act("/api/play", { station: name }));
+        els.stations.appendChild(btn);
+      }
+    } catch (err) {
+      showOffline(err);
+    }
+    els.stop.addEventListener("click", () => act("/api/stop", {}));
+    await refresh();
+    setInterval(refresh, 3000);
+  }
+
+  init();
+</script>
+</body>
+</html>
