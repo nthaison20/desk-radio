@@ -145,8 +145,17 @@
     content: ""; position: absolute; inset: 0; pointer-events: none;
     background: repeating-linear-gradient(to bottom, rgb(0 0 0 / 0.28) 0 1px, transparent 1px 3px);
   }
-  #pixelmap { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: pointer; touch-action: manipulation; }
+  #pixelmap { display: block; image-rendering: pixelated; image-rendering: crisp-edges; cursor: grab; touch-action: none; }
+  #pixelmap:active { cursor: grabbing; }
   .map-status { position: absolute; font: 1.3rem var(--pixel); color: var(--muted); }
+  .zoom { position: absolute; top: 8px; right: 8px; z-index: 1; display: grid; gap: 4px; }
+  .zoom button {
+    width: 40px; height: 40px; padding: 0; font: 1.6rem/1 var(--pixel); cursor: pointer; border-radius: 2px;
+    border: 2px solid var(--line); background: rgb(12 10 6 / 0.85); color: var(--text);
+  }
+  .zoom button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .zoom button:disabled { opacity: 0.35; cursor: default; }
+  .map-help { color: var(--muted); font-size: 0.8rem; margin: 6px 2px 0; }
   .place-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; margin: 12px 2px 8px; }
   .place-title { font: 1.3rem/1.2 var(--pixel); letter-spacing: 0.03em; text-transform: uppercase; }
   .place-count { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
@@ -208,9 +217,14 @@
       <div class="map-title" id="map-title">World</div>
     </div>
     <div class="screen" id="screen">
-      <canvas id="pixelmap" role="img" aria-label="Pixel map of radio stations. Tap a country, then a station marker."></canvas>
+      <canvas id="pixelmap" role="img" aria-label="Pixel map of radio stations. Tap a country, then a station marker. Drag to move, pinch or use the zoom buttons to zoom."></canvas>
       <div class="map-status" id="map-status">LOADING…</div>
+      <div class="zoom">
+        <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+        <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+      </div>
     </div>
+    <p class="map-help">Drag to move · pinch, scroll or +/− to zoom · double-tap to zoom in</p>
     <div class="place-head">
       <span class="place-title" id="place-title"></span>
       <span class="place-count" id="place-count"></span>
@@ -232,6 +246,7 @@
     panelMine: $("panel-mine"), panelExplore: $("panel-explore"), panelMap: $("panel-map"),
     mine: $("mine"), results: $("results"), search: $("search"), q: $("q"), by: $("by"), hint: $("hint"), more: $("more"),
     mapBack: $("map-back"), mapTitle: $("map-title"), screen: $("screen"), canvas: $("pixelmap"), mapStatus: $("map-status"),
+    zoomIn: $("zoom-in"), zoomOut: $("zoom-out"),
     placeTitle: $("place-title"), placeCount: $("place-count"), place: $("place"), placeMore: $("place-more"),
   };
   const app = {
@@ -460,10 +475,18 @@
   els.placeMore.addEventListener("click", () => { app.listAll = true; renderList(); });
 
   // ---- pixel map -----------------------------------------------------------
-  // Countries are drawn by our own scanline rasteriser onto a small canvas, then scaled up
-  // with hard pixel edges. Data: country outlines (TopoJSON) + popular stations grouped into places.
-  const WORLD = { lon0: -180, lon1: 180, lat0: -56, lat1: 84 };
-  const pm = { countries: null, count: 0, places: 0, view: { kind: "world" }, frame: null, selCell: null, loading: null };
+  // Countries are drawn by our own scanline rasteriser onto a small canvas, then scaled up with
+  // hard pixel edges. A camera (centre + scale) in Web-Mercator space supports real zoom: the map
+  // is redrawn at every zoom, so pixels stay chunky while detail increases.
+  const RAD = Math.PI / 180;
+  const merc = lat => Math.log(Math.tan(Math.PI / 4 + Math.max(-85, Math.min(85, lat)) * RAD / 2)) / RAD;
+  const WORLD_LAT = [-56, 80];   // what the world view frames
+  const LAT_LIMITS = [-58, 84];  // how far north/south you can pan
+  const MARK_SPAN = 60;          // degrees across or less: stations show as "+" markers and can be tapped
+  const pm = {
+    countries: null, allPlaces: [], count: 0, places: 0,
+    sel: -1, selPlace: null, cam: null, size: null, frame: null, loading: null,
+  };
 
   function decodeTopo(topo) {
     const [sx, sy] = topo.transform.scale, [tx, ty] = topo.transform.translate;
@@ -487,7 +510,9 @@
         if (x < lonMin) lonMin = x; if (x > lonMax) lonMax = x;
         if (y < latMin) latMin = y; if (y > latMax) latMax = y;
       }
-      Object.assign(pts, { lonMin, lonMax, latMin, latMax });
+      const my = new Float64Array(pts.length); // Mercator y, precomputed once
+      for (let k = 0; k < pts.length; k++) my[k] = merc(pts[k][1]);
+      Object.assign(pts, { lonMin, lonMax, latMin, latMax, my, myMin: merc(latMin), myMax: merc(latMax) });
       return pts;
     };
     return topo.objects.countries.geometries.map(g => {
@@ -521,11 +546,11 @@
 
   const simple = s => (s || "").toLowerCase().replace(/^the /, "").replace(/[^a-z]/g, "");
   const sameName = (a, b) => { a = simple(a); b = simple(b); return !!a && !!b && (a.includes(b) || b.includes(a)); };
-
   const OFFSHORE = 1.5; // degrees: how far off a coastline a station can be and still count for that country
 
   function assignPlaces(places) {
     for (const p of places) {
+      p.my = merc(p.lat);
       let hit = -1, named = -1, near = -1, nearD = Infinity;
       const listed = p.stations[0] && p.stations[0].country;
       pm.countries.forEach((c, i) => {
@@ -557,12 +582,12 @@
     const [topo, data] = await Promise.all([api("/countries-50m.json"), api("/api/map")]);
     pm.countries = decodeTopo(topo);
     assignPlaces(data.places);
-    pm.allPlaces = data.places; // the world view shows every place, including ones outside any country
+    pm.allPlaces = data.places; // the map shows every place, including ones outside any country
     pm.count = data.count;
     pm.places = data.places.length;
   }
 
-  // Bounds for a country view. Countries with far-flung territories (France, USA, Netherlands...)
+  // Bounds for flying to a country. Countries with far-flung territories (France, USA, Netherlands...)
   // would shrink to a speck if we fitted everything, so the view centres on the main landmass:
   // the polygon holding the most stations (or the largest, if none). Islands and stations within
   // a margin around it are included; distant territories stay out of the view but in the list.
@@ -577,11 +602,10 @@
       const score = stations * 1e6 + Math.abs(area); // stations first, area breaks ties
       if (score > mainScore) { mainScore = score; main = poly; }
     }
-    if (!main) return WORLD;
+    if (!main) return { lon0: -180, lon1: 180, lat0: WORLD_LAT[0], lat1: WORLD_LAT[1] };
     const r0 = main[0];
     const b = [r0.lonMin, r0.latMin, r0.lonMax, r0.latMax];
     const ref = (b[0] + b[2]) / 2; // everything else is placed on the main landmass's side of the date line
-    // Margin around the main landmass: half its size, at least 3 degrees.
     const mx = Math.max((b[2] - b[0]) * 0.5, 3), my = Math.max((b[3] - b[1]) * 0.5, 3);
     const near = [b[0] - mx, b[1] - my, b[2] + mx, b[3] + my];
     const inNear = (lon, lat) => lon >= near[0] && lon <= near[2] && lat >= near[1] && lat <= near[3];
@@ -598,7 +622,7 @@
       if (inNear(lon, p.lat)) grow(lon, p.lat, lon, p.lat);
     }
     const padLon = Math.max((b[2] - b[0]) * 0.08, 0.6), padLat = Math.max((b[3] - b[1]) * 0.08, 0.4);
-    return { lon0: b[0] - padLon, lon1: b[2] + padLon, lat0: Math.max(b[1] - padLat, -89), lat1: Math.min(b[3] + padLat, 89) };
+    return { lon0: b[0] - padLon, lon1: b[2] + padLon, lat0: Math.max(b[1] - padLat, -84), lat1: Math.min(b[3] + padLat, 84) };
   }
 
   function fillRings(rings, W, H, grid, id) {
@@ -635,33 +659,88 @@
     return [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16));
   }
 
-  function renderMap() {
-    if (!pm.countries || els.panelMap.hidden) return;
-    const v = pm.view;
-    const sel = v.kind === "country" ? v.idx : -1;
-    const b = sel >= 0 ? countryBounds(pm.countries[sel]) : WORLD;
-
-    // Choose a pixel size so the map is ~170-260 "pixels" across, each drawn as a P x P square.
+  // ---- camera ----
+  // cam = { lon: centre longitude, my: centre Mercator y, s: map pixels per degree }
+  function measure() {
     const cssW = els.screen.clientWidth - 4;
-    const P = Math.max(2, Math.round(cssW / 210));
-    const maxW = Math.floor(cssW / P);
-    const maxH = Math.floor(Math.min(window.innerHeight * 0.58, 520) / P);
-    const kx = sel >= 0 ? Math.cos(((b.lat0 + b.lat1) / 2) * Math.PI / 180) : 1;
-    const s = Math.min(maxW / ((b.lon1 - b.lon0) * kx), maxH / (b.lat1 - b.lat0));
-    const W = Math.max(1, Math.round((b.lon1 - b.lon0) * kx * s)), H = Math.max(1, Math.round((b.lat1 - b.lat0) * s));
-    const T = (lon, lat) => [(lon - b.lon0) * kx * s, (b.lat1 - lat) * s];
-    const mid = (b.lon0 + b.lon1) / 2;
-    const ptLon = lon => nearestLon(lon, mid); // put points on this view's side of the date line
+    const P = Math.max(2, Math.round(cssW / 210));             // each map pixel is a P x P css square
+    // About 3:4, so the whole world (fitted to the width) nearly fills it, and zoomed views still get room.
+    const cssH = Math.max(220, Math.min(window.innerHeight * 0.55, cssW * 0.78, 480));
+    pm.size = { W: Math.max(1, Math.floor(cssW / P)), H: Math.max(1, Math.floor(cssH / P)), P };
+    els.canvas.width = pm.size.W; els.canvas.height = pm.size.H;
+    els.canvas.style.width = `${pm.size.W * P}px`; els.canvas.style.height = `${pm.size.H * P}px`;
+  }
 
-    // Each ring is drawn at whichever of its copies (lon - 360, lon, lon + 360) overlap the view,
-    // so shapes crossing the date line appear on both edges of the world map and whole in country views.
+  function clampCam(c) {
+    const { W, H } = pm.size;
+    const s = Math.max(W / 360, Math.min(W / 0.4, c.s)); // from whole world wide to ~0.4 degrees across
+    const half = H / (2 * s), yMin = merc(LAT_LIMITS[0]), yMax = merc(LAT_LIMITS[1]);
+    const my = yMax - yMin <= 2 * half ? (yMin + yMax) / 2 : Math.max(yMin + half, Math.min(yMax - half, c.my));
+    return { lon: ((c.lon + 540) % 360 + 360) % 360 - 180, my, s }; // longitude wraps around the globe
+  }
+
+  function fitCam(b) {
+    const { W, H } = pm.size;
+    const y0 = merc(b.lat0), y1 = merc(b.lat1);
+    return clampCam({ lon: (b.lon0 + b.lon1) / 2, my: (y0 + y1) / 2, s: Math.min(W / (b.lon1 - b.lon0), H / (y1 - y0)) });
+  }
+  const worldCam = () => fitCam({ lon0: -180, lon1: 180, lat0: WORLD_LAT[0], lat1: WORLD_LAT[1] });
+
+  let flight = 0, renderQueued = false;
+  function requestRender() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => { renderQueued = false; renderMap(); });
+  }
+
+  function setCam(c) { pm.cam = clampCam(c); requestRender(); }
+
+  function flyTo(target, ms = 380) {
+    cancelAnimationFrame(flight);
+    const from = pm.cam;
+    if (!from || matchMedia("(prefers-reduced-motion: reduce)").matches) { setCam(target); return; }
+    const to = { ...target, lon: nearestLon(target.lon, from.lon) }; // take the short way round
+    const t0 = performance.now();
+    const step = now => {
+      const t = Math.min(1, (now - t0) / ms), k = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      pm.cam = clampCam({ lon: from.lon + (to.lon - from.lon) * k, my: from.my + (to.my - from.my) * k, s: from.s * (to.s / from.s) ** k });
+      renderMap();
+      if (t < 1) flight = requestAnimationFrame(step);
+    };
+    flight = requestAnimationFrame(step);
+  }
+  const stopFlight = () => cancelAnimationFrame(flight);
+
+  // Zoom by `factor`, keeping the map point under (bx, by) (map pixels) where it is.
+  function zoomAt(bx, by, factor, animate) {
+    const { W, H } = pm.size, c = pm.cam;
+    const lon = c.lon + (bx - W / 2) / c.s, my = c.my - (by - H / 2) / c.s;
+    const s = Math.max(W / 360, Math.min(W / 0.4, c.s * factor));
+    const next = { lon: lon - (bx - W / 2) / s, my: my + (by - H / 2) / s, s };
+    animate ? flyTo(next, 220) : setCam(next);
+  }
+
+  // ---- drawing ----
+  function renderMap() {
+    if (!pm.countries || !pm.cam || els.panelMap.hidden) return;
+    const { W, H, P } = pm.size, { lon: clon, my: cmy, s } = pm.cam;
+    const span = W / s;
+    const lonL = clon - span / 2, lonR = clon + span / 2;
+    const yTop = cmy + H / (2 * s), yBottom = cmy - H / (2 * s);
+    const X = lon => (lon - clon) * s + W / 2;
+    const Y = my => (cmy - my) * s + H / 2;
+    const sel = pm.sel;
+
+    // Each ring is drawn at whichever of its copies (lon - 360, lon, lon + 360) overlap the view.
     const visibleRings = c => {
       const out = [];
       for (const r of c.rings) {
-        if (r.latMax < b.lat0 || r.latMin > b.lat1) continue;
+        if (r.myMax < yBottom || r.myMin > yTop) continue;
         for (const off of [-360, 0, 360]) {
-          if (r.lonMax + off < b.lon0 || r.lonMin + off > b.lon1) continue;
-          out.push(r.map(([lon, lat]) => T(lon + off, lat)));
+          if (r.lonMax + off < lonL || r.lonMin + off > lonR) continue;
+          const pts = new Array(r.length);
+          for (let k = 0; k < r.length; k++) pts[k] = [X(r[k][0] + off), Y(r.my[k])];
+          out.push(pts);
         }
       }
       return out;
@@ -670,13 +749,13 @@
     const grid = new Int16Array(W * H).fill(-1);
     const tiny = [];
     pm.countries.forEach((c, i) => {
-      if (!fillRings(visibleRings(c), W, H, grid, i)) tiny.push(i);
+      const rings = visibleRings(c);
+      if (rings.length && !fillRings(rings, W, H, grid, i)) tiny.push(i);
     });
     // Countries too small for even one pixel get one, so they can be seen and tapped. Those with
-    // stations claim a pixel even inside a bigger neighbour (Switzerland, Israel at world scale),
-    // most stations first; if their best pixel is already claimed, they take the nearest free one.
-    const claimed = new Set();
-    const owned = new Map(); // pixels per country, so we only take pixels from countries that can spare them
+    // stations claim a pixel even inside a bigger neighbour (Switzerland at world scale), most
+    // stations first, never taking the last pixels of another small country.
+    const claimed = new Set(), owned = new Map();
     for (const g of grid) if (g >= 0) owned.set(g, (owned.get(g) || 0) + 1);
     const canTake = (k, i) => grid[k] < 0 || (grid[k] !== i && (owned.get(grid[k]) || 0) >= 4);
     tiny.sort((a, b) => pm.countries[b].stations - pm.countries[a].stations);
@@ -685,7 +764,7 @@
       let r = null; // centre on its largest shape
       for (const poly of c.polys) if (!r || (poly[0].lonMax - poly[0].lonMin) * (poly[0].latMax - poly[0].latMin) > (r.lonMax - r.lonMin) * (r.latMax - r.latMin)) r = poly[0];
       if (!r) continue;
-      const [cx, cy] = T(ptLon((r.lonMin + r.lonMax) / 2), (r.latMin + r.latMax) / 2).map(Math.floor);
+      const cx = Math.floor(X(nearestLon((r.lonMin + r.lonMax) / 2, clon))), cy = Math.floor(Y((r.myMin + r.myMax) / 2));
       let spot = -1;
       for (let rad = 0; rad <= 2 && spot < 0; rad++) {
         for (let dy = -rad; dy <= rad && spot < 0; dy++) for (let dx = -rad; dx <= rad && spot < 0; dx++) {
@@ -725,52 +804,92 @@
       }
     }
 
-    // Station markers: one per pixel cell, brighter where more stations share it.
+    // Station markers, one per map pixel. Zoomed out they're single dots, brighter where more stations
+    // share the pixel; zoomed in (or inside the chosen country) they become tappable "+" markers.
+    const zoomedIn = span <= MARK_SPAN;
     const cells = new Map();
-    const placesShown = sel >= 0 ? pm.countries[sel].places : pm.allPlaces;
-    for (const p of placesShown) {
-      const [fx, fy] = T(ptLon(p.lon), p.lat);
-      const x = Math.floor(fx), y = Math.floor(fy);
+    for (const p of pm.allPlaces) {
+      if (p.my < yBottom || p.my > yTop) continue;
+      const x = Math.floor(X(nearestLon(p.lon, clon))), y = Math.floor(Y(p.my));
       if (x < 0 || y < 0 || x >= W || y >= H) continue;
       const key = y * W + x;
       let cell = cells.get(key);
-      if (!cell) cells.set(key, cell = { key, x, y, stations: [] });
+      if (!cell) cells.set(key, cell = { key, x, y, stations: [], places: [], own: false });
       cell.stations.push(...p.stations);
+      cell.places.push(p);
+      if (sel < 0 || p.country === sel) cell.own = true;
     }
     const tier = n => (n >= 10 ? col.d3 : n >= 3 ? col.d2 : col.d1);
     for (const cell of cells.values()) {
-      const c = tier(cell.stations.length);
-      if (sel >= 0) { // a small "+" marker in country view
-        put(cell.x - 1, cell.y, col.d1); put(cell.x + 1, cell.y, col.d1);
-        put(cell.x, cell.y - 1, col.d1); put(cell.x, cell.y + 1, col.d1);
+      // Zoomed in, every marker can be tapped; inside a chosen country, its markers can be tapped at any zoom.
+      cell.tappable = zoomedIn || (sel >= 0 && cell.own);
+      if (cell.tappable) {
+        const arm = cell.own ? col.d1 : col.dim; // markers outside the chosen country are drawn dimmer
+        put(cell.x - 1, cell.y, arm); put(cell.x + 1, cell.y, arm);
+        put(cell.x, cell.y - 1, arm); put(cell.x, cell.y + 1, arm);
+        put(cell.x, cell.y, cell.own ? tier(cell.stations.length) : col.d1);
+      } else {
+        put(cell.x, cell.y, cell.own ? tier(cell.stations.length) : col.d1);
       }
-      put(cell.x, cell.y, c);
     }
-    const chosen = pm.selCell != null && cells.get(pm.selCell);
-    if (chosen) { // selected marker: a bright 3x3 block
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) put(chosen.x + dx, chosen.y + dy, col.hi);
-    }
+    const chosen = pm.selPlace && [...cells.values()].find(cell => cell.places.includes(pm.selPlace));
+    if (chosen) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) put(chosen.x + dx, chosen.y + dy, col.hi);
 
-    const canvas = els.canvas;
-    canvas.width = W; canvas.height = H;
-    canvas.style.width = `${W * P}px`; canvas.style.height = `${H * P}px`;
-    canvas.getContext("2d").putImageData(img, 0, 0);
-    pm.frame = { W, H, P, grid, cells, sel };
+    els.canvas.getContext("2d").putImageData(img, 0, 0);
+    pm.frame = { grid, cells, zoomedIn };
+    els.zoomIn.disabled = s >= W / 0.4 - 1e-9;
+    els.zoomOut.disabled = s <= W / 360 + 1e-9;
+    els.mapBack.hidden = sel < 0 && !pm.selPlace && s <= (W / 360) * 1.02; // a way home whenever you've moved off the world view
   }
 
-  function toCell(e) {
+  // ---- views ----
+  const byRank = list => list.slice().sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9));
+  const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+
+  function showWorld() {
+    pm.sel = -1;
+    pm.selPlace = null;
+    els.mapTitle.textContent = "World";
+    showList("Tap a country to zoom in", `${plural(pm.count, "station")} · ${plural(pm.places, "place")}`, null);
+    flyTo(worldCam());
+  }
+
+  function showCountry(idx, fly = true) {
+    const c = pm.countries[idx];
+    pm.sel = idx;
+    pm.selPlace = null;
+    els.mapTitle.textContent = c.name;
+    const stations = byRank(c.places.flatMap(p => p.stations));
+    showList(stations.length ? "Top stations · tap a + for one spot" : "No located stations here yet",
+             stations.length ? plural(stations.length, "station") : "", stations);
+    if (fly) flyTo(fitCam(countryBounds(c))); else requestRender();
+  }
+
+  function showCell(cell) {
+    pm.selPlace = cell.places[0];
+    if (pm.sel < 0) { // browsing freely: name the spot's country, but don't lock the map to it
+      const c = pm.countries[cell.places[0].country];
+      els.mapTitle.textContent = c ? c.name : "Open sea";
+    }
+    showList("Stations at this spot", plural(cell.stations.length, "station"), byRank(cell.stations));
+    requestRender();
+    els.placeTitle.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  // ---- input: tap, double-tap, drag, pinch, wheel, buttons ----
+  const toMap = (clientX, clientY) => {
     const r = els.canvas.getBoundingClientRect();
-    const f = pm.frame;
-    return [Math.floor((e.clientX - r.left) / r.width * f.W), Math.floor((e.clientY - r.top) / r.height * f.H)];
-  }
+    return [(clientX - r.left) / r.width * pm.size.W, (clientY - r.top) / r.height * pm.size.H];
+  };
 
   function countryAt(x, y, radius) {
-    const f = pm.frame;
+    const { W, H } = pm.size, grid = pm.frame.grid;
+    x = Math.floor(x); y = Math.floor(y);
     let best = -1, bestD = Infinity;
     for (let dy = -radius; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) {
       const cx = x + dx, cy = y + dy;
-      if (cx < 0 || cy < 0 || cx >= f.W || cy >= f.H) continue;
-      const id = f.grid[cy * f.W + cx], d = dx * dx + dy * dy;
+      if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
+      const id = grid[cy * W + cx], d = dx * dx + dy * dy;
       if (id >= 0 && d < bestD) { best = id; bestD = d; }
     }
     return best;
@@ -779,72 +898,106 @@
   function cellNear(x, y, radius) {
     let best = null, bestD = radius * radius + 1;
     for (const cell of pm.frame.cells.values()) {
-      const d = (cell.x - x) ** 2 + (cell.y - y) ** 2;
+      if (!cell.tappable) continue;
+      const d = (cell.x + 0.5 - x) ** 2 + (cell.y + 0.5 - y) ** 2;
       if (d < bestD) { best = cell; bestD = d; }
     }
     return best;
   }
 
-  const byRank = list => list.slice().sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9));
-  const plural = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
-
-  function showWorld() {
-    pm.view = { kind: "world" };
-    pm.selCell = null;
-    els.mapBack.hidden = true;
-    els.mapTitle.textContent = "World";
-    showList("Tap a country to zoom in", `${plural(pm.count, "station")} · ${plural(pm.places, "place")}`, null);
-    renderMap();
-  }
-
-  function showCountry(idx) {
-    const c = pm.countries[idx];
-    pm.view = { kind: "country", idx };
-    pm.selCell = null;
-    els.mapBack.hidden = false;
-    els.mapTitle.textContent = c.name;
-    const stations = byRank(c.places.flatMap(p => p.stations));
-    showList(stations.length ? "Top stations · tap a + for one spot" : "No located stations here yet",
-             stations.length ? plural(stations.length, "station") : "", stations);
-    renderMap();
-  }
-
-  function showCell(cell) {
-    pm.selCell = cell.key;
-    const n = cell.stations.length;
-    showList("Stations at this spot", plural(n, "station"), byRank(cell.stations));
-    renderMap();
-    els.placeTitle.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }
-
-  els.canvas.addEventListener("click", e => {
+  function singleTap(x, y) {
     if (!pm.frame) return;
-    const [x, y] = toCell(e);
-    if (pm.view.kind === "world") {
-      const id = countryAt(x, y, 2);
-      if (id >= 0) showCountry(id);
+    const cell = cellNear(x, y, Math.max(3, 16 / pm.size.P)); // ~16 css px finger tolerance
+    if (cell) { showCell(cell); return; }
+    const id = countryAt(x, y, pm.frame.zoomedIn ? 0 : 2);
+    if (id >= 0 && id !== pm.sel) showCountry(id);
+    else if (id >= 0 && pm.selPlace) showCountry(id, false); // tap the chosen country again: whole-country list
+  }
+
+  const pointers = new Map();
+  let gesture = null, lastTap = null, tapTimer = 0;
+
+  els.canvas.addEventListener("pointerdown", e => {
+    if (!pm.frame) return;
+    stopFlight();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { els.canvas.setPointerCapture(e.pointerId); } catch {} // keeps the drag going if the finger leaves the map; optional
+    gesture = pointers.size === 1 ? { moved: false, x0: e.clientX, y0: e.clientY } : { moved: true };
+  });
+
+  els.canvas.addEventListener("pointermove", e => {
+    if (!pm.frame) return;
+    if (!pointers.has(e.pointerId)) { // plain mouse hover on the world: show the country name
+      if (e.pointerType === "mouse" && pm.sel < 0) {
+        const id = countryAt(...toMap(e.clientX, e.clientY), 1);
+        els.mapTitle.textContent = id >= 0 ? pm.countries[id].name : "World";
+      }
       return;
     }
-    const cell = cellNear(x, y, Math.max(3, Math.round(16 / pm.frame.P))); // ~16 css px finger tolerance
-    if (cell) { showCell(cell); return; }
-    const other = countryAt(x, y, 0);
-    if (other >= 0 && other !== pm.view.idx && pm.countries[other].stations > 0) showCountry(other); // hop to a neighbour
-    else if (pm.selCell != null) showCountry(pm.view.idx); // tap empty land: back to the whole country
+    const prev = pointers.get(e.pointerId), cur = { x: e.clientX, y: e.clientY };
+    if (pointers.size === 1) {
+      if (!gesture.moved && Math.hypot(cur.x - gesture.x0, cur.y - gesture.y0) < 6) return; // still a tap
+      gesture.moved = true;
+      const c = pm.cam, k = pm.size.P * c.s;
+      setCam({ lon: c.lon - (cur.x - prev.x) / k, my: c.my + (cur.y - prev.y) / k, s: c.s });
+    } else if (pointers.size === 2) {
+      const other = [...pointers.entries()].find(([id]) => id !== e.pointerId)[1];
+      const d0 = Math.hypot(prev.x - other.x, prev.y - other.y), d1 = Math.hypot(cur.x - other.x, cur.y - other.y);
+      const m0 = toMap((prev.x + other.x) / 2, (prev.y + other.y) / 2), m1 = toMap((cur.x + other.x) / 2, (cur.y + other.y) / 2);
+      if (d0 > 0) zoomAt(m0[0], m0[1], d1 / d0, false);
+      const c = pm.cam; // then follow the fingers' midpoint
+      pm.cam = clampCam({ lon: c.lon - (m1[0] - m0[0]) / c.s, my: c.my + (m1[1] - m0[1]) / c.s, s: c.s });
+    }
+    pointers.set(e.pointerId, cur);
   });
-  els.canvas.addEventListener("pointermove", e => {
-    if (!pm.frame || pm.view.kind !== "world" || e.pointerType !== "mouse") return;
-    const [x, y] = toCell(e);
-    const id = countryAt(x, y, 1);
-    els.mapTitle.textContent = id >= 0 ? pm.countries[id].name : "World";
+
+  const endPointer = e => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.delete(e.pointerId);
+    if (pointers.size === 1) { gesture = { moved: true }; return; } // finishing a pinch never counts as a tap
+    if (pointers.size || !gesture || gesture.moved || e.type !== "pointerup") return;
+    const [x, y] = toMap(e.clientX, e.clientY), now = performance.now();
+    if (lastTap && now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.cx, e.clientY - lastTap.cy) < 30) {
+      clearTimeout(tapTimer); // double-tap: zoom in on that spot
+      lastTap = null;
+      zoomAt(x, y, 2, true);
+      return;
+    }
+    lastTap = { t: now, cx: e.clientX, cy: e.clientY };
+    clearTimeout(tapTimer);
+    tapTimer = setTimeout(() => singleTap(x, y), 260); // wait briefly in case it's a double-tap
+  };
+  els.canvas.addEventListener("pointerup", endPointer);
+  els.canvas.addEventListener("pointercancel", endPointer);
+  els.canvas.addEventListener("pointerleave", e => {
+    if (e.pointerType === "mouse" && pm.sel < 0 && !pointers.size) els.mapTitle.textContent = "World";
   });
-  els.canvas.addEventListener("pointerleave", () => { if (pm.view.kind === "world") els.mapTitle.textContent = "World"; });
+
+  els.canvas.addEventListener("wheel", e => {
+    if (!pm.frame) return;
+    e.preventDefault(); // zoom the map instead of scrolling the page
+    stopFlight();
+    const dy = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
+    zoomAt(...toMap(e.clientX, e.clientY), Math.exp(-dy * 0.0018), false);
+  }, { passive: false });
+
+  els.zoomIn.addEventListener("click", () => pm.frame && zoomAt(pm.size.W / 2, pm.size.H / 2, 2, true));
+  els.zoomOut.addEventListener("click", () => pm.frame && zoomAt(pm.size.W / 2, pm.size.H / 2, 0.5, true));
   els.mapBack.addEventListener("click", showWorld);
 
   let resizeTimer = 0;
-  window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderMap, 150); });
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!pm.cam || els.panelMap.hidden) return;
+      measure();
+      pm.cam = clampCam(pm.cam);
+      renderMap();
+    }, 150);
+  });
 
   async function openMap() {
-    if (pm.countries) { renderMap(); return; }
+    if (pm.countries) { measure(); pm.cam = clampCam(pm.cam); renderMap(); return; }
     if (pm.loading) return;
     els.mapStatus.hidden = false;
     els.mapStatus.textContent = "LOADING…";
@@ -852,6 +1005,8 @@
     try {
       await pm.loading;
       els.mapStatus.hidden = true;
+      measure();
+      pm.cam = worldCam();
       showWorld();
     } catch (err) {
       pm.countries = null;
