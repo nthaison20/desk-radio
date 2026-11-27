@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
 <title>Desk Radio</title>
 <style>
   :root {
@@ -14,6 +16,7 @@
     --accent: #c2410c;
     --accent-text: #ffffff;
     --live: #15803d;
+    --wait: #b45309;
     --bad: #b91c1c;
   }
   @media (prefers-color-scheme: dark) {
@@ -26,6 +29,7 @@
       --accent: #fb923c;
       --accent-text: #1d1b18;
       --live: #4ade80;
+      --wait: #fbbf24;
       --bad: #f87171;
     }
   }
@@ -50,8 +54,12 @@
   .now-state { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 0.95rem; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
   .playing .dot { background: var(--live); }
-  .offline .dot { background: var(--bad); }
+  .loading .dot { background: var(--wait); }
+  .failed .dot { background: var(--bad); }
   .error { color: var(--bad); font-size: 0.9rem; margin-top: 8px; }
+  .controls { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+  .controls label { color: var(--muted); font-size: 0.9rem; }
+  .controls input[type=range] { flex: 1; accent-color: var(--accent); min-height: 32px; }
   .stations { display: grid; gap: 10px; }
   button {
     font: inherit;
@@ -66,10 +74,9 @@
     cursor: pointer;
   }
   button:hover { border-color: var(--muted); }
-  button:disabled { opacity: 0.6; cursor: wait; }
   button.current { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
   button.stop { margin-top: 16px; text-align: center; font-weight: 600; }
-  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -78,14 +85,20 @@
 
   <section class="now" id="now" aria-live="polite">
     <div class="now-label">Now</div>
-    <div class="now-station" id="now-station">…</div>
-    <div class="now-state"><span class="dot"></span><span id="now-state">Connecting</span></div>
+    <div class="now-station" id="now-station">Nothing selected</div>
+    <div class="now-state"><span class="dot"></span><span id="now-state">Stopped</span></div>
     <div class="error" id="now-error" hidden></div>
+    <div class="controls">
+      <label for="volume">Volume</label>
+      <input id="volume" type="range" min="0" max="1" step="0.05" value="0.8">
+    </div>
   </section>
 
   <div class="stations" id="stations"></div>
   <button class="stop" id="stop" type="button">Stop</button>
 </main>
+
+<audio id="player" preload="none"></audio>
 
 <script>
   const els = {
@@ -95,75 +108,101 @@
     error: document.getElementById("now-error"),
     stations: document.getElementById("stations"),
     stop: document.getElementById("stop"),
+    volume: document.getElementById("volume"),
+    player: document.getElementById("player"),
   };
-  const STATE_TEXT = { play: "Playing", stop: "Stopped", pause: "Paused" };
-  let current = null;
+  let current = null; // {name, url} of the selected station, or null
 
-  async function api(path, body) {
-    const opts = body === undefined ? {} : {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    };
-    const res = await fetch(path, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-    return data;
+  // Per-device conveniences; the page works the same if storage is unavailable.
+  const store = {
+    get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+    set(key, value) { try { localStorage.setItem(key, value); } catch {} },
+  };
+
+  function setState(kind, text, error) {
+    els.now.className = "now" + (kind ? " " + kind : "");
+    els.state.textContent = text;
+    els.error.hidden = !error;
+    els.error.textContent = error || "";
   }
 
-  function show(info) {
-    current = info.state === "play" ? info.station : null;
-    els.now.className = "now" + (info.state === "play" ? " playing" : "");
-    els.station.textContent = info.station || "Nothing selected";
-    els.state.textContent = STATE_TEXT[info.state] || info.state;
-    els.error.hidden = !info.error;
-    els.error.textContent = info.error || "";
+  function highlight() {
     for (const btn of els.stations.children) {
-      btn.classList.toggle("current", btn.dataset.name === current);
-      btn.setAttribute("aria-pressed", btn.dataset.name === current);
+      const on = !!current && btn.dataset.name === current.name;
+      btn.classList.toggle("current", on);
+      btn.setAttribute("aria-pressed", on);
     }
   }
 
-  function showOffline(err) {
-    els.now.className = "now offline";
-    els.state.textContent = "Offline";
-    els.error.hidden = false;
-    els.error.textContent = err.message;
-  }
-
-  async function act(path, body) {
-    const buttons = document.querySelectorAll("button");
-    buttons.forEach(b => (b.disabled = true));
-    try {
-      show(await api(path, body));
-    } catch (err) {
-      showOffline(err);
-    } finally {
-      buttons.forEach(b => (b.disabled = false));
+  function play(station) {
+    current = station;
+    els.station.textContent = station.name;
+    highlight();
+    setState("loading", "Connecting…");
+    els.player.src = station.url;
+    els.player.play().catch(err => {
+      if (err.name !== "AbortError") setState("failed", "Couldn't play", err.message);
+    });
+    store.set("desk-radio:last", station.name);
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: "Desk Radio" });
     }
   }
 
-  async function refresh() {
-    try { show(await api("/api/status")); } catch (err) { showOffline(err); }
+  function stop() {
+    // Removing the source (not just pausing) stops the live stream from downloading.
+    els.player.pause();
+    els.player.removeAttribute("src");
+    els.player.load();
+    current = null;
+    highlight();
+    setState("", "Stopped");
+  }
+
+  els.player.addEventListener("playing", () => setState("playing", "Playing"));
+  els.player.addEventListener("waiting", () => current && setState("loading", "Buffering…"));
+  // Switching stations fires a transient "pause"; only show Paused if it's still paused after play() runs.
+  els.player.addEventListener("pause", () => setTimeout(() => {
+    if (current && els.player.paused) setState("", "Paused");
+  }, 0));
+  els.player.addEventListener("error", () => {
+    if (!current) return;
+    setState("failed", "Stream unavailable", "This station isn't responding. Try another, or try again later.");
+  });
+
+  els.volume.value = store.get("desk-radio:volume") ?? els.volume.value;
+  els.player.volume = Number(els.volume.value);
+  els.volume.addEventListener("input", () => {
+    els.player.volume = Number(els.volume.value);
+    store.set("desk-radio:volume", els.volume.value);
+  });
+
+  els.stop.addEventListener("click", stop);
+
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.setActionHandler("play", () => current && els.player.play());
+    navigator.mediaSession.setActionHandler("pause", () => els.player.pause());
+    navigator.mediaSession.setActionHandler("stop", stop);
   }
 
   async function init() {
     try {
-      const { stations } = await api("/api/stations");
-      for (const name of stations) {
+      const res = await fetch("/api/stations");
+      if (!res.ok) throw new Error(`Couldn't load stations (${res.status})`);
+      const { stations } = await res.json();
+      const last = store.get("desk-radio:last");
+      for (const station of stations) {
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.dataset.name = name;
-        btn.textContent = name;
-        btn.addEventListener("click", () => act("/api/play", { station: name }));
+        btn.dataset.name = station.name;
+        btn.textContent = station.name;
+        btn.addEventListener("click", () => play(station));
         els.stations.appendChild(btn);
+        if (station.name === last) els.station.textContent = `${station.name} (last played)`;
       }
     } catch (err) {
-      showOffline(err);
+      setState("failed", "Offline", err.message);
     }
-    els.stop.addEventListener("click", () => act("/api/stop", {}));
-    await refresh();
-    setInterval(refresh, 3000);
   }
 
   init();
