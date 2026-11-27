@@ -223,3 +223,7 @@ __marimo__/
 .streamlit/secrets.toml
 # desk-radio
 .env
+
+# desk-radio saved stations (per device, written by web.py)
+my-stations.json
+my-stations.json.tmp

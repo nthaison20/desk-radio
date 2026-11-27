@@ -13,11 +13,13 @@
     --text: #1d1b18;
     --muted: #6b665e;
     --line: #e2ddd3;
+    --soft: #efebe3;
     --accent: #c2410c;
     --accent-text: #ffffff;
     --live: #15803d;
     --wait: #b45309;
     --bad: #b91c1c;
+    --star: #d97706;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -26,11 +28,13 @@
       --text: #f1ede6;
       --muted: #a39d93;
       --line: #35322d;
+      --soft: #2a2824;
       --accent: #fb923c;
       --accent-text: #1d1b18;
       --live: #4ade80;
       --wait: #fbbf24;
       --bad: #f87171;
+      --star: #fbbf24;
     }
   }
   * { box-sizing: border-box; }
@@ -40,43 +44,93 @@
     color: var(--text);
     font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  main { max-width: 480px; margin: 0 auto; padding: 24px 16px 40px; }
-  h1 { font-size: 1.35rem; margin: 0 0 16px; letter-spacing: -0.01em; }
+  main { max-width: 560px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 1.35rem; margin: 0 0 14px; letter-spacing: -0.01em; }
+
+  /* Now playing */
   .now {
+    position: sticky; top: 8px; z-index: 2;
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: 14px;
-    padding: 16px;
-    margin-bottom: 20px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    box-shadow: 0 6px 18px -14px rgb(0 0 0 / 0.5);
   }
-  .now-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-  .now-station { font-size: 1.25rem; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
-  .now-state { display: flex; align-items: center; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 0.95rem; }
+  .now-top { display: flex; align-items: center; gap: 12px; }
+  .now-text { flex: 1; min-width: 0; }
+  .now-station { font-size: 1.1rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .now-state { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
   .playing .dot { background: var(--live); }
   .loading .dot { background: var(--wait); }
   .failed .dot { background: var(--bad); }
-  .error { color: var(--bad); font-size: 0.9rem; margin-top: 8px; }
-  .controls { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
-  .controls label { color: var(--muted); font-size: 0.9rem; }
-  .controls input[type=range] { flex: 1; accent-color: var(--accent); min-height: 32px; }
-  .stations { display: grid; gap: 10px; }
-  button {
-    font: inherit;
-    width: 100%;
-    min-height: 52px;
-    padding: 12px 16px;
-    border-radius: 12px;
-    border: 1px solid var(--line);
-    background: var(--card);
-    color: var(--text);
-    text-align: left;
-    cursor: pointer;
+  .error { color: var(--bad); font-size: 0.88rem; margin-top: 6px; }
+  .controls { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .controls label { color: var(--muted); font-size: 0.85rem; }
+  .controls input[type=range] { flex: 1; accent-color: var(--accent); min-height: 28px; }
+  .stop {
+    font: inherit; font-weight: 600; font-size: 0.9rem;
+    min-height: 40px; padding: 0 14px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--soft); color: var(--text); cursor: pointer;
   }
-  button:hover { border-color: var(--muted); }
-  button.current { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
-  button.stop { margin-top: 16px; text-align: center; font-weight: 600; }
-  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 6px; background: var(--soft); padding: 4px; border-radius: 12px; margin-bottom: 14px; }
+  .tab {
+    flex: 1; font: inherit; font-weight: 600; font-size: 0.95rem;
+    min-height: 42px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer;
+  }
+  .tab[aria-selected=true] { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgb(0 0 0 / 0.12); }
+
+  /* Search */
+  .search { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-bottom: 8px; }
+  .search input, .search select {
+    font: inherit; min-height: 46px; padding: 0 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text); min-width: 0;
+  }
+  .search .go {
+    grid-column: 1 / -1; font: inherit; font-weight: 600; min-height: 46px; border: 0; border-radius: 10px;
+    background: var(--accent); color: var(--accent-text); cursor: pointer;
+  }
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 4px 2px 12px; }
+
+  /* Station rows */
+  .list { display: grid; gap: 8px; }
+  .row {
+    display: flex; align-items: center; gap: 4px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  }
+  .row.current { border-color: var(--accent); box-shadow: inset 4px 0 0 var(--accent); }
+  .play {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px;
+    font: inherit; text-align: left; padding: 10px 4px 10px 12px; min-height: 60px;
+    background: none; border: 0; color: var(--text); cursor: pointer;
+  }
+  .logo {
+    position: relative; width: 40px; height: 40px; border-radius: 8px; flex: none;
+    background: var(--soft); display: grid; place-items: center;
+    font-weight: 700; color: var(--muted); overflow: hidden;
+  }
+  .logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: var(--card); opacity: 0; transition: opacity 0.2s; }
+  .logo img.ready { opacity: 1; }
+  .meta { min-width: 0; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub { color: var(--muted); font-size: 0.83rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .star {
+    flex: none; width: 48px; min-height: 60px; font-size: 1.35rem; line-height: 1;
+    background: none; border: 0; color: var(--muted); cursor: pointer;
+  }
+  .star[aria-pressed=true] { color: var(--star); }
+  .note { color: var(--muted); text-align: center; padding: 24px 8px; }
+  .more {
+    width: 100%; margin-top: 10px; font: inherit; font-weight: 600; min-height: 46px;
+    border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer;
+  }
+  .credit { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 22px; }
+  .credit a { color: inherit; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -84,9 +138,13 @@
   <h1>Desk Radio</h1>
 
   <section class="now" id="now" aria-live="polite">
-    <div class="now-label">Now</div>
-    <div class="now-station" id="now-station">Nothing selected</div>
-    <div class="now-state"><span class="dot"></span><span id="now-state">Stopped</span></div>
+    <div class="now-top">
+      <div class="now-text">
+        <div class="now-station" id="now-station">Nothing playing</div>
+        <div class="now-state"><span class="dot"></span><span id="now-state">Pick a station below</span></div>
+      </div>
+      <button class="stop" id="stop" type="button">Stop</button>
+    </div>
     <div class="error" id="now-error" hidden></div>
     <div class="controls">
       <label for="volume">Volume</label>
@@ -94,31 +152,61 @@
     </div>
   </section>
 
-  <div class="stations" id="stations"></div>
-  <button class="stop" id="stop" type="button">Stop</button>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tab-mine" aria-controls="panel-mine" aria-selected="true">My stations</button>
+    <button class="tab" role="tab" id="tab-explore" aria-controls="panel-explore" aria-selected="false">Explore</button>
+  </div>
+
+  <section id="panel-mine" role="tabpanel" aria-labelledby="tab-mine">
+    <div class="list" id="mine"></div>
+  </section>
+
+  <section id="panel-explore" role="tabpanel" aria-labelledby="tab-explore" hidden>
+    <form class="search" id="search">
+      <input id="q" type="search" placeholder="Search stations" aria-label="Search" autocomplete="off" enterkeyhint="search">
+      <select id="by" aria-label="Search by">
+        <option value="name">Name</option>
+        <option value="tag">Genre</option>
+        <option value="country">Country</option>
+      </select>
+      <button class="go" type="submit">Search</button>
+    </form>
+    <p class="hint" id="hint">Most popular stations worldwide</p>
+    <div class="list" id="results"></div>
+    <button class="more" id="more" type="button" hidden>Load more</button>
+    <p class="credit">Station directory by <a href="https://www.radio-browser.info" target="_blank" rel="noopener">Radio Browser</a></p>
+  </section>
 </main>
 
 <audio id="player" preload="none"></audio>
 
 <script>
+  const $ = id => document.getElementById(id);
   const els = {
-    now: document.getElementById("now"),
-    station: document.getElementById("now-station"),
-    state: document.getElementById("now-state"),
-    error: document.getElementById("now-error"),
-    stations: document.getElementById("stations"),
-    stop: document.getElementById("stop"),
-    volume: document.getElementById("volume"),
-    player: document.getElementById("player"),
+    now: $("now"), station: $("now-station"), state: $("now-state"), error: $("now-error"),
+    stop: $("stop"), volume: $("volume"), player: $("player"),
+    tabMine: $("tab-mine"), tabExplore: $("tab-explore"), panelMine: $("panel-mine"), panelExplore: $("panel-explore"),
+    mine: $("mine"), results: $("results"), search: $("search"), q: $("q"), by: $("by"), hint: $("hint"), more: $("more"),
   };
-  let current = null; // {name, url} of the selected station, or null
+  const app = { mine: [], results: [], current: null, query: { q: "", by: "name" }, offset: 0, loaded: false };
 
-  // Per-device conveniences; the page works the same if storage is unavailable.
+  // Per-device conveniences; everything still works if storage is unavailable.
   const store = {
     get(key) { try { return localStorage.getItem(key); } catch { return null; } },
     set(key, value) { try { localStorage.setItem(key, value); } catch {} },
   };
 
+  async function api(path, body) {
+    const opts = body === undefined ? {} : {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    };
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  }
+
+  // ---- playback ----------------------------------------------------------
   function setState(kind, text, error) {
     els.now.className = "now" + (kind ? " " + kind : "");
     els.state.textContent = text;
@@ -126,26 +214,20 @@
     els.error.textContent = error || "";
   }
 
-  function highlight() {
-    for (const btn of els.stations.children) {
-      const on = !!current && btn.dataset.name === current.name;
-      btn.classList.toggle("current", on);
-      btn.setAttribute("aria-pressed", on);
-    }
-  }
-
   function play(station) {
-    current = station;
+    app.current = station;
     els.station.textContent = station.name;
-    highlight();
     setState("loading", "Connecting…");
     els.player.src = station.url;
     els.player.play().catch(err => {
       if (err.name !== "AbortError") setState("failed", "Couldn't play", err.message);
     });
-    store.set("desk-radio:last", station.name);
+    store.set("desk-radio:last", station.id);
+    renderAll();
+    if (!station.id.startsWith("local:")) api("/api/click", { id: station.id }).catch(() => {});
     if ("mediaSession" in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: "Desk Radio" });
+      const artwork = station.favicon && station.favicon.startsWith("http") ? [{ src: station.favicon }] : [];
+      navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: subtitle(station) || "Desk Radio", artwork });
     }
   }
 
@@ -154,20 +236,21 @@
     els.player.pause();
     els.player.removeAttribute("src");
     els.player.load();
-    current = null;
-    highlight();
+    app.current = null;
+    els.station.textContent = "Nothing playing";
     setState("", "Stopped");
+    renderAll();
   }
 
   els.player.addEventListener("playing", () => setState("playing", "Playing"));
-  els.player.addEventListener("waiting", () => current && setState("loading", "Buffering…"));
+  els.player.addEventListener("waiting", () => app.current && setState("loading", "Buffering…"));
   // Switching stations fires a transient "pause"; only show Paused if it's still paused after play() runs.
   els.player.addEventListener("pause", () => setTimeout(() => {
-    if (current && els.player.paused) setState("", "Paused");
+    if (app.current && els.player.paused) setState("", "Paused");
   }, 0));
   els.player.addEventListener("error", () => {
-    if (!current) return;
-    setState("failed", "Stream unavailable", "This station isn't responding. Try another, or try again later.");
+    if (!app.current) return;
+    setState("failed", "Stream unavailable", "This station isn't playing in this browser. Try another, or try again later.");
   });
 
   els.volume.value = store.get("desk-radio:volume") ?? els.volume.value;
@@ -176,35 +259,169 @@
     els.player.volume = Number(els.volume.value);
     store.set("desk-radio:volume", els.volume.value);
   });
-
   els.stop.addEventListener("click", stop);
-
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.setActionHandler("play", () => current && els.player.play());
+    navigator.mediaSession.setActionHandler("play", () => app.current && els.player.play());
     navigator.mediaSession.setActionHandler("pause", () => els.player.pause());
     navigator.mediaSession.setActionHandler("stop", stop);
   }
 
-  async function init() {
-    try {
-      const res = await fetch("/api/stations");
-      if (!res.ok) throw new Error(`Couldn't load stations (${res.status})`);
-      const { stations } = await res.json();
-      const last = store.get("desk-radio:last");
-      for (const station of stations) {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.dataset.name = station.name;
-        btn.textContent = station.name;
-        btn.addEventListener("click", () => play(station));
-        els.stations.appendChild(btn);
-        if (station.name === last) els.station.textContent = `${station.name} (last played)`;
-      }
-    } catch (err) {
-      setState("failed", "Offline", err.message);
+  // ---- station rows --------------------------------------------------------
+  function subtitle(s) {
+    const parts = [];
+    if (s.country) parts.push(s.country);
+    if (s.tags && s.tags.length) parts.push(s.tags.slice(0, 2).join(", "));
+    if (s.bitrate) parts.push(`${s.bitrate} kbps`);
+    return parts.join(" · ");
+  }
+
+  function logo(s) {
+    const box = document.createElement("span");
+    box.className = "logo";
+    box.textContent = (s.name.trim()[0] || "?").toUpperCase();
+    // The logo sits on top of the letter; if it fails to load, it's removed and the letter shows.
+    if (s.favicon && /^https?:\/\//.test(s.favicon)) {
+      const img = document.createElement("img");
+      img.alt = "";
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      img.onload = () => img.classList.add("ready");
+      img.onerror = () => img.remove();
+      img.src = s.favicon;
+      box.append(img);
+    }
+    return box;
+  }
+
+  function row(s) {
+    const saved = app.mine.some(m => m.id === s.id);
+    const isCurrent = !!app.current && app.current.id === s.id;
+    const el = document.createElement("div");
+    el.className = "row" + (isCurrent ? " current" : "");
+
+    const playBtn = document.createElement("button");
+    playBtn.type = "button";
+    playBtn.className = "play";
+    playBtn.setAttribute("aria-label", `Play ${s.name}`);
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = s.name;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = subtitle(s) || " ";
+    meta.append(name, sub);
+    playBtn.append(logo(s), meta);
+    playBtn.addEventListener("click", () => play(s));
+
+    const star = document.createElement("button");
+    star.type = "button";
+    star.className = "star";
+    star.textContent = saved ? "★" : "☆";
+    star.setAttribute("aria-pressed", saved);
+    star.setAttribute("aria-label", saved ? `Remove ${s.name} from My stations` : `Save ${s.name} to My stations`);
+    star.addEventListener("click", () => toggleSaved(s));
+
+    el.append(playBtn, star);
+    return el;
+  }
+
+  function renderMine() {
+    els.mine.replaceChildren(...app.mine.map(row));
+    if (!app.mine.length) {
+      const p = document.createElement("p");
+      p.className = "note";
+      p.textContent = "No saved stations yet. Find some in Explore and tap ☆ to save them here.";
+      els.mine.append(p);
     }
   }
 
+  function renderResults() {
+    els.results.replaceChildren(...app.results.map(row));
+  }
+
+  function renderAll() { renderMine(); renderResults(); }
+
+  async function toggleSaved(s) {
+    const saved = app.mine.some(m => m.id === s.id);
+    try {
+      const data = saved ? await api("/api/stations/remove", { id: s.id }) : await api("/api/stations", s);
+      app.mine = data.stations;
+      renderAll();
+    } catch (err) {
+      setState("failed", els.state.textContent, `Couldn't update My stations: ${err.message}`);
+    }
+  }
+
+  // ---- explore -----------------------------------------------------------
+  function note(text) {
+    const p = document.createElement("p");
+    p.className = "note";
+    p.textContent = text;
+    return p;
+  }
+
+  async function search(reset) {
+    if (reset) {
+      app.offset = 0;
+      app.results = [];
+      els.results.replaceChildren(note("Searching…"));
+      els.more.hidden = true;
+    }
+    els.more.disabled = true;
+    const params = new URLSearchParams({ q: app.query.q, by: app.query.by, offset: app.offset });
+    try {
+      const data = await api(`/api/search?${params}`);
+      const seen = new Set(app.results.map(r => r.id));
+      app.results.push(...data.stations.filter(s => !seen.has(s.id)));
+      app.offset += 40;
+      renderResults();
+      if (!app.results.length) els.results.replaceChildren(note("No stations found. Try a different word or search type."));
+      els.more.hidden = !data.more;
+    } catch (err) {
+      if (reset) els.results.replaceChildren(note(err.message));
+      else els.more.textContent = "Couldn't load more. Tap to retry.";
+    } finally {
+      els.more.disabled = false;
+    }
+  }
+
+  els.search.addEventListener("submit", e => {
+    e.preventDefault();
+    els.q.blur();
+    app.query = { q: els.q.value.trim(), by: els.by.value };
+    const label = { name: "name", tag: "genre", country: "country" }[app.query.by];
+    els.hint.textContent = app.query.q ? `Stations matching ${label} “${app.query.q}”, most popular first` : "Most popular stations worldwide";
+    search(true);
+  });
+  els.more.addEventListener("click", () => { els.more.textContent = "Load more"; search(false); });
+
+  // ---- tabs --------------------------------------------------------------
+  function showTab(which) {
+    const explore = which === "explore";
+    els.tabMine.setAttribute("aria-selected", !explore);
+    els.tabExplore.setAttribute("aria-selected", explore);
+    els.panelMine.hidden = explore;
+    els.panelExplore.hidden = !explore;
+    store.set("desk-radio:tab", which);
+    if (explore && !app.loaded) { app.loaded = true; search(true); }
+  }
+  els.tabMine.addEventListener("click", () => showTab("mine"));
+  els.tabExplore.addEventListener("click", () => showTab("explore"));
+
+  // ---- start -------------------------------------------------------------
+  async function init() {
+    try {
+      app.mine = (await api("/api/stations")).stations;
+      const last = app.mine.find(s => s.id === store.get("desk-radio:last"));
+      if (last) els.station.textContent = `${last.name} (last played)`;
+    } catch (err) {
+      setState("failed", "Offline", err.message);
+    }
+    renderMine();
+    showTab(store.get("desk-radio:tab") === "explore" ? "explore" : "mine");
+  }
   init();
 </script>
 </body>
