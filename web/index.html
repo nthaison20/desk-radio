@@ -75,6 +75,7 @@
   .now-top { display: flex; align-items: center; gap: 12px; }
   .now-text { flex: 1; min-width: 0; }
   .now-station { font-size: 1.08rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .now-song { color: var(--text); font-size: 0.9rem; margin: 1px 0 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .now-state { display: flex; align-items: center; gap: 8px; color: var(--muted); font: 1.15rem/1.2 var(--pixel); letter-spacing: 0.03em; }
   .dot { width: 8px; height: 8px; background: var(--muted); flex: none; }
   .playing .dot { background: var(--live); box-shadow: var(--glow); }
@@ -204,6 +205,7 @@
     <div class="now-top">
       <div class="now-text">
         <div class="now-station" id="now-station">Nothing playing</div>
+        <div class="now-song" id="now-song" hidden></div>
         <div class="now-state"><span class="dot"></span><span id="now-state">Pick a station below</span></div>
       </div>
       <button class="stop" id="stop" type="button">Stop</button>
@@ -280,7 +282,7 @@
 <script>
   const $ = id => document.getElementById(id);
   const els = {
-    now: $("now"), station: $("now-station"), state: $("now-state"), error: $("now-error"),
+    now: $("now"), station: $("now-station"), song: $("now-song"), state: $("now-state"), error: $("now-error"),
     stop: $("stop"), volume: $("volume"), player: $("player"),
     tabMine: $("tab-mine"), tabExplore: $("tab-explore"), tabMap: $("tab-map"),
     panelMine: $("panel-mine"), panelExplore: $("panel-explore"), panelMap: $("panel-map"),
@@ -335,10 +337,47 @@
     store.set("desk-radio:last", station.id);
     renderAll();
     if (!station.id.startsWith("local:")) api("/api/click", { id: station.id }).catch(() => {});
-    if ("mediaSession" in navigator) {
-      const artwork = station.favicon && station.favicon.startsWith("http") ? [{ src: station.favicon }] : [];
-      navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: subtitle(station) || "Desk Radio", artwork });
-    }
+    startSong(station);
+  }
+
+  // ---- current song --------------------------------------------------------
+  // The XU4 reads the song title a station embeds in its stream; we ask every 20 s while playing.
+  // On the lock screen the song becomes the title and the station the subtitle.
+  const SONG_EVERY = 20000;
+  let songTimer = 0, songFor = null;
+
+  function showSong(title) {
+    els.song.hidden = !title;
+    els.song.textContent = title ? `♪ ${title}` : "";
+    const s = app.current;
+    if (!s || !("mediaSession" in navigator)) return;
+    const artwork = s.favicon && s.favicon.startsWith("http") ? [{ src: s.favicon }] : [];
+    navigator.mediaSession.metadata = new MediaMetadata(title
+      ? { title, artist: s.name, album: "Desk Radio", artwork }
+      : { title: s.name, artist: subtitle(s) || "Desk Radio", artwork });
+  }
+
+  async function pollSong(station) {
+    if (songFor !== station) return; // switched or stopped meanwhile
+    try {
+      const { title } = await api(`/api/nowplaying?url=${encodeURIComponent(station.url)}`);
+      if (songFor === station && title !== (els.song.hidden ? null : els.song.textContent.slice(2))) showSong(title);
+    } catch {} // the song line is a nice-to-have; playback doesn't depend on it
+    if (songFor === station) songTimer = setTimeout(() => pollSong(station), SONG_EVERY);
+  }
+
+  function startSong(station) {
+    clearTimeout(songTimer);
+    songFor = station;
+    showSong(null);
+    pollSong(station);
+  }
+
+  function stopSong() {
+    clearTimeout(songTimer);
+    songFor = null;
+    els.song.hidden = true;
+    els.song.textContent = "";
   }
 
   function stop() {
@@ -347,6 +386,7 @@
     els.player.removeAttribute("src");
     els.player.load();
     app.current = null;
+    stopSong();
     els.station.textContent = "Nothing playing";
     setState("", "STOPPED");
     renderAll();
@@ -360,6 +400,7 @@
   }, 0));
   els.player.addEventListener("error", () => {
     if (!app.current) return;
+    stopSong(); // no point asking for the song of a station that won't play
     setState("failed", "NO SIGNAL", "This station isn't playing in this browser. Try another, or try again later.");
   });
 

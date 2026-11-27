@@ -18,6 +18,8 @@ Each browser streams the station itself. Standard library only: nothing to insta
                                  fetched once and cached for a day
     GET  /countries-50m.json     country outlines for the pixel map (world-atlas 2.0.2,
                                  ISC licence; Natural Earth data, public domain)
+    GET  /api/nowplaying?url=    the song title a station embeds in its stream, if any
+                                 {"title": "Artist - Song" | null}; public addresses only
     GET  /api/places?q=          look up a city/place via OpenStreetMap Nominatim
                                  (one lookup per second at most, results cached a day)
     POST /login, /logout         sign in with the password (form field "password") / out
@@ -37,6 +39,8 @@ signs every device out. Without a password, the page is open to anyone who can r
 import gzip
 import hashlib
 import hmac
+import http.client
+import ipaddress
 import json
 import os
 import random
@@ -50,7 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 HERE = Path(__file__).resolve().parent
 HOST = os.environ.get("DESK_RADIO_HOST", "0.0.0.0")
@@ -233,6 +237,87 @@ def trim_station(s):
     }
 
 
+# ---- now playing ------------------------------------------------------------
+# Many stations embed the current song in their stream ("ICY" metadata): ask for it with an
+# "Icy-MetaData: 1" header, skip the first `icy-metaint` bytes of audio, then read one metadata
+# block containing StreamTitle='Artist - Song';. Browsers can't do this themselves, so we do.
+# Only public internet addresses are fetched (also after redirects), so this can't be used to
+# make the XU4 reach devices on your home network.
+
+NOWPLAYING_CACHE_SECONDS = 15
+MAX_METAINT = 65536  # bytes of audio we're willing to skip before the title (typical: 8-16 KB)
+
+
+def _public_host(host):
+    """True if every address the host name resolves to is on the public internet."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return False
+        if not ip.is_global:  # private, loopback, link-local, reserved, carrier-grade NAT (incl. Tailscale)
+            return False
+    return bool(infos)
+
+
+def _public_url(url):
+    parts = urlsplit(url)
+    return parts.scheme in ("http", "https") and bool(parts.hostname) and _public_host(parts.hostname)
+
+
+class _PublicRedirectsOnly(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _public_url(newurl):
+            raise URLError("redirect to a non-public address refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_icy_opener = build_opener(_PublicRedirectsOnly)
+_np_lock = threading.Lock()
+_np_cache = {}
+
+
+def _read_stream_title(url):
+    path = urlsplit(url).path.lower()
+    if path.endswith((".m3u8", ".m3u", ".pls")) or not _public_url(url):
+        return None  # playlists/HLS carry no ICY titles; non-public addresses are refused
+    req = Request(url, headers={"Icy-MetaData": "1", "User-Agent": USER_AGENT})
+    try:
+        with _icy_opener.open(req, timeout=6) as res:
+            metaint = int(res.headers.get("icy-metaint") or 0)
+            if not 0 < metaint <= MAX_METAINT:
+                return None
+            res.read(metaint)  # the audio before the first metadata block
+            size = res.read(1)
+            meta = res.read(size[0] * 16) if size else b""
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    try:
+        text = meta.decode("utf-8")
+    except UnicodeDecodeError:
+        text = meta.decode("latin-1")  # older stations
+    match = re.search(r"StreamTitle='(.*?)';", text, re.S)
+    title = match.group(1).strip() if match else ""
+    return title[:200] or None
+
+
+def stream_title(url):
+    with _np_lock:
+        hit = _np_cache.get(url)
+        if hit and time.time() - hit[0] < NOWPLAYING_CACHE_SECONDS:
+            return hit[1]
+    title = _read_stream_title(url)
+    with _np_lock:
+        if len(_np_cache) > 200:
+            _np_cache.clear()
+        _np_cache[url] = (time.time(), title)
+    return title
+
+
 # ---- map -------------------------------------------------------------------
 
 _map_lock = threading.Lock()
@@ -363,6 +448,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, PAGE.read_bytes(), "text/html; charset=utf-8")
         elif url.path == "/api/stations":
             self._json(HTTPStatus.OK, {"stations": load_my_stations(), "signin": bool(PASSWORD)})
+        elif url.path == "/api/nowplaying":
+            stream = (parse_qs(url.query).get("url") or [""])[0]
+            if not stream.startswith(("http://", "https://")) or len(stream) > 2000:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "Expected a stream URL"})
+                return
+            self._json(HTTPStatus.OK, {"title": stream_title(stream)})
         elif url.path == "/api/places":
             q = (parse_qs(url.query).get("q") or [""])[0].strip()[:100]
             if len(q) < 2:
