@@ -13,6 +13,9 @@ Each browser streams the station itself. Standard library only: nothing to insta
                                  search Radio Browser; by = name | tag | country;
                                  empty q lists the most popular stations
     POST /api/click              body {"id"}: tell Radio Browser a station was played
+    GET  /api/map                popular stations that have a location, grouped into
+                                 places {"places": [{"lat", "lon", "stations": [...]}]};
+                                 fetched once and cached for a day
 
 Saved stations live in my-stations.json next to this file (gitignored). The first
 time it is missing, it is seeded from stations.txt ('name = url' per line).
@@ -25,6 +28,7 @@ Any username is accepted. Without it, the page is open to anyone who can reach i
 """
 import base64
 import binascii
+import gzip
 import hmac
 import json
 import os
@@ -32,6 +36,7 @@ import random
 import re
 import socket
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,6 +56,9 @@ USER_AGENT = "desk-radio/1.0"
 RB_TIMEOUT = 8
 PAGE_SIZE = 40
 MAX_BODY = 4096
+MAP_STATIONS = 5000        # most popular located stations shown on the map
+MAP_CACHE_SECONDS = 24 * 3600
+MAP_GRID = 0.1             # degrees (~10 km): stations closer than this share one map dot
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SEARCH_FIELDS = {"name", "tag", "country"}
 
@@ -128,6 +136,48 @@ def trim_station(s):
         "codec": s.get("codec") or "",
         "bitrate": s.get("bitrate") or 0,
     }
+
+
+# ---- map -------------------------------------------------------------------
+
+_map_lock = threading.Lock()
+_map_cache = {"time": 0.0, "body": None}  # body = gzipped JSON, ready to send
+
+
+def _build_map():
+    results = radio_browser.get("/json/stations/search", {
+        "has_geo_info": "true", "hidebroken": "true", "order": "clickcount",
+        "reverse": "true", "limit": str(MAP_STATIONS),
+    })
+    places = {}
+    for s in results:
+        lat, lon = s.get("geo_lat"), s.get("geo_long")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        station = trim_station(s)
+        if not station["id"] or not station["url"]:
+            continue
+        key = (round(lat / MAP_GRID), round(lon / MAP_GRID))
+        place = places.setdefault(key, {"lat": round(lat, 3), "lon": round(lon, 3), "stations": []})
+        place["stations"].append(station)  # results are most-popular first, so lists stay sorted
+    data = {"places": list(places.values()), "count": sum(len(p["stations"]) for p in places.values())}
+    return gzip.compress(json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def map_data():
+    """Gzipped map JSON, rebuilt at most once a day; serves the old copy if a rebuild fails."""
+    with _map_lock:  # one rebuild at a time; other requests wait for it instead of piling on
+        fresh = time.time() - _map_cache["time"] < MAP_CACHE_SECONDS
+        if _map_cache["body"] is None or not fresh:
+            try:
+                _map_cache["body"] = _build_map()
+                _map_cache["time"] = time.time()
+            except (OSError, ValueError):
+                if _map_cache["body"] is None:
+                    raise
+        return _map_cache["body"]
 
 
 # ---- saved stations -------------------------------------------------------
@@ -210,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"stations": load_my_stations()})
         elif url.path == "/api/search":
             self._search(parse_qs(url.query))
+        elif url.path == "/api/map":
+            self._map()
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
@@ -268,6 +320,23 @@ class Handler(BaseHTTPRequestHandler):
         stations = [trim_station(s) for s in results if isinstance(s, dict)]
         stations = [s for s in stations if s["id"] and s["url"]]
         self._json(HTTPStatus.OK, {"stations": stations, "more": len(results) == PAGE_SIZE})
+
+    def _map(self):
+        try:
+            body = map_data()
+        except (OSError, ValueError) as exc:
+            self._json(HTTPStatus.BAD_GATEWAY, {"error": f"Station directory unavailable: {exc}"})
+            return
+        if "gzip" not in self.headers.get("Accept-Encoding", ""):
+            self._send(HTTPStatus.OK, gzip.decompress(body), "application/json")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _authorized(self):
         """Check the Basic Auth password; on failure send 401 so the browser asks for it."""

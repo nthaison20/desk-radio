@@ -127,6 +127,15 @@
     width: 100%; margin-top: 10px; font: inherit; font-weight: 600; min-height: 46px;
     border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer;
   }
+  /* Map */
+  #map {
+    height: min(62vh, 560px); min-height: 320px; border-radius: 14px;
+    border: 1px solid var(--line); background: var(--soft); overflow: hidden;
+  }
+  .place-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 10px; margin: 14px 2px 8px; }
+  .place-title { font-weight: 600; }
+  .place-count { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+  .leaflet-container { font: inherit; }
   .credit { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 22px; }
   .credit a { color: inherit; }
   button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
@@ -155,6 +164,7 @@
   <div class="tabs" role="tablist">
     <button class="tab" role="tab" id="tab-mine" aria-controls="panel-mine" aria-selected="true">My stations</button>
     <button class="tab" role="tab" id="tab-explore" aria-controls="panel-explore" aria-selected="false">Explore</button>
+    <button class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="false">Map</button>
   </div>
 
   <section id="panel-mine" role="tabpanel" aria-labelledby="tab-mine">
@@ -176,6 +186,17 @@
     <button class="more" id="more" type="button" hidden>Load more</button>
     <p class="credit">Station directory by <a href="https://www.radio-browser.info" target="_blank" rel="noopener">Radio Browser</a></p>
   </section>
+
+  <section id="panel-map" role="tabpanel" aria-labelledby="tab-map" hidden>
+    <div id="map" role="region" aria-label="Map of radio stations"></div>
+    <div class="place-head">
+      <span class="place-title" id="place-title">Loading stations…</span>
+      <span class="place-count" id="place-count"></span>
+    </div>
+    <div class="list" id="place"></div>
+    <button class="more" id="place-more" type="button" hidden>Show all</button>
+    <p class="credit">Station locations by <a href="https://www.radio-browser.info" target="_blank" rel="noopener">Radio Browser</a></p>
+  </section>
 </main>
 
 <audio id="player" preload="none"></audio>
@@ -187,8 +208,13 @@
     stop: $("stop"), volume: $("volume"), player: $("player"),
     tabMine: $("tab-mine"), tabExplore: $("tab-explore"), panelMine: $("panel-mine"), panelExplore: $("panel-explore"),
     mine: $("mine"), results: $("results"), search: $("search"), q: $("q"), by: $("by"), hint: $("hint"), more: $("more"),
+    tabMap: $("tab-map"), panelMap: $("panel-map"), map: $("map"),
+    placeTitle: $("place-title"), placeCount: $("place-count"), place: $("place"), placeMore: $("place-more"),
   };
-  const app = { mine: [], results: [], current: null, query: { q: "", by: "name" }, offset: 0, loaded: false };
+  const app = {
+    mine: [], results: [], current: null, query: { q: "", by: "name" }, offset: 0, loaded: false,
+    map: null, place: null, placeAll: false,
+  };
 
   // Per-device conveniences; everything still works if storage is unavailable.
   const store = {
@@ -341,7 +367,7 @@
     els.results.replaceChildren(...app.results.map(row));
   }
 
-  function renderAll() { renderMine(); renderResults(); }
+  function renderAll() { renderMine(); renderResults(); renderPlace(); }
 
   async function toggleSaved(s) {
     const saved = app.mine.some(m => m.id === s.id);
@@ -397,18 +423,95 @@
   });
   els.more.addEventListener("click", () => { els.more.textContent = "Load more"; search(false); });
 
-  // ---- tabs --------------------------------------------------------------
-  function showTab(which) {
-    const explore = which === "explore";
-    els.tabMine.setAttribute("aria-selected", !explore);
-    els.tabExplore.setAttribute("aria-selected", explore);
-    els.panelMine.hidden = explore;
-    els.panelExplore.hidden = !explore;
-    store.set("desk-radio:tab", which);
-    if (explore && !app.loaded) { app.loaded = true; search(true); }
+  // ---- map ---------------------------------------------------------------
+  const PLACE_PREVIEW = 25;
+
+  function loadAsset(tag, attrs) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement(tag);
+      Object.assign(el, attrs, { onload: resolve, onerror: () => reject(new Error("Couldn't load the map library")) });
+      document.head.append(el);
+    });
   }
-  els.tabMine.addEventListener("click", () => showTab("mine"));
-  els.tabExplore.addEventListener("click", () => showTab("explore"));
+
+  function renderPlace() {
+    const p = app.place;
+    if (!p) return;
+    const shown = app.placeAll ? p.stations : p.stations.slice(0, PLACE_PREVIEW);
+    els.place.replaceChildren(...shown.map(row));
+    els.placeMore.hidden = app.placeAll || p.stations.length <= PLACE_PREVIEW;
+    els.placeMore.textContent = `Show all ${p.stations.length}`;
+  }
+
+  function openPlace(p) {
+    app.place = p;
+    app.placeAll = false;
+    const countries = [...new Set(p.stations.map(s => s.country).filter(Boolean))];
+    els.placeTitle.textContent = countries.slice(0, 2).join(" / ") || "Stations here";
+    els.placeCount.textContent = `${p.stations.length} station${p.stations.length === 1 ? "" : "s"}`;
+    renderPlace();
+    els.placeTitle.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  els.placeMore.addEventListener("click", () => { app.placeAll = true; renderPlace(); });
+
+  async function initMap() {
+    app.map = "loading";
+    try {
+      await Promise.all([
+        loadAsset("link", { rel: "stylesheet", href: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" }),
+        loadAsset("script", { src: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" }),
+      ]);
+      const map = L.map(els.map, { preferCanvas: true, worldCopyJump: true, minZoom: 2, maxZoom: 12 }).setView([25, 10], 2);
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+      }).addTo(map);
+      app.map = map;
+
+      const { places, count } = await api("/api/map");
+      const css = getComputedStyle(document.documentElement);
+      const fill = css.getPropertyValue("--accent").trim();
+      const outline = css.getPropertyValue("--card").trim();
+      const renderer = L.canvas({ tolerance: 8 }); // easier to tap small dots on a phone
+      // Dots are small when zoomed out (so busy regions don't merge into a blob) and grow as you zoom in;
+      // places with more stations get bigger dots.
+      const radius = (n, zoom) => Math.min((1.5 + Math.sqrt(n) * 0.7) * (0.75 + 0.3 * Math.max(0, zoom - 2)), 16);
+      const markers = places.map(p => L.circleMarker([p.lat, p.lon], {
+        renderer, radius: radius(p.stations.length, map.getZoom()),
+        color: outline, weight: 0.8, fillColor: fill, fillOpacity: 0.8,
+      }).on("click", () => openPlace(p)).addTo(map));
+      map.on("zoomend", () => {
+        const zoom = map.getZoom();
+        markers.forEach((m, i) => m.setRadius(radius(places[i].stations.length, zoom)));
+      });
+      els.placeTitle.textContent = "Tap a dot to see its stations";
+      els.placeCount.textContent = `${count.toLocaleString()} stations in ${places.length.toLocaleString()} places`;
+    } catch (err) {
+      app.map = null; // allow a retry next time the tab opens
+      els.placeTitle.textContent = err.message;
+      els.placeCount.textContent = "";
+    }
+  }
+
+  // ---- tabs --------------------------------------------------------------
+  const tabs = {
+    mine: [els.tabMine, els.panelMine],
+    explore: [els.tabExplore, els.panelExplore],
+    map: [els.tabMap, els.panelMap],
+  };
+  function showTab(which) {
+    for (const [name, [tab, panel]] of Object.entries(tabs)) {
+      tab.setAttribute("aria-selected", name === which);
+      panel.hidden = name !== which;
+    }
+    store.set("desk-radio:tab", which);
+    if (which === "explore" && !app.loaded) { app.loaded = true; search(true); }
+    if (which === "map") {
+      if (!app.map) initMap();
+      else if (app.map !== "loading") app.map.invalidateSize(); // the map was sized while hidden
+    }
+  }
+  for (const [name, [tab]] of Object.entries(tabs)) tab.addEventListener("click", () => showTab(name));
 
   // ---- start -------------------------------------------------------------
   async function init() {
@@ -420,7 +523,8 @@
       setState("failed", "Offline", err.message);
     }
     renderMine();
-    showTab(store.get("desk-radio:tab") === "explore" ? "explore" : "mine");
+    const savedTab = store.get("desk-radio:tab");
+    showTab(savedTab in tabs ? savedTab : "mine");
   }
   init();
 </script>
